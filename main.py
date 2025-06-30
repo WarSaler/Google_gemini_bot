@@ -198,7 +198,9 @@ class GeminiBot:
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений"""
         user_id = update.effective_user.id
-        user_message = update.message.text
+        message_text = update.message.text
+        
+        logger.info(f"Received message from user {user_id}: {message_text[:100]}...")
         
         # Проверка лимитов
         if not self.can_make_request(user_id):
@@ -208,12 +210,20 @@ class GeminiBot:
             )
             return
 
-        # Добавление сообщения в историю
+        # Инициализация сессии пользователя
+        if user_id not in user_sessions:
+            user_sessions[user_id] = []
+
+        # Добавление сообщения пользователя в историю
         user_sessions[user_id].append({
             'role': 'user',
-            'content': user_message,
+            'content': message_text,
             'timestamp': datetime.now()
         })
+
+        # Ограничение количества сообщений в истории
+        if len(user_sessions[user_id]) > 100:  # 50 пар сообщений
+            user_sessions[user_id] = user_sessions[user_id][-100:]
 
         # Подготовка сообщений для API
         messages = []
@@ -224,7 +234,11 @@ class GeminiBot:
                 messages.append({'text': f"Assistant: {msg['content']}"})
 
         # Показать индикатор набора
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+            logger.info(f"Sent typing indicator for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Could not send typing indicator for user {user_id}: {e}")
 
         # Вызов API
         logger.info(f"Calling Gemini API for user {user_id} with {len(messages)} messages")
@@ -245,24 +259,70 @@ class GeminiBot:
             # Получение оставшихся запросов
             remaining_hour, remaining_day = self.get_remaining_requests(user_id)
             
-            # Отправка ответа с лимитами
-            full_response = f"{response}\n\n📊 Осталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+            # Отправка ответа с безопасной обработкой
+            await self.safe_send_message(update, response, remaining_hour, remaining_day, user_id)
+        else:
+            logger.error(f"No response received from Gemini API for user {user_id}")
+            await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
+
+    async def safe_send_message(self, update: Update, response: str, remaining_hour: int = None, remaining_day: int = None, user_id: int = None):
+        """Безопасная отправка сообщения с множественными fallback вариантами"""
+        try:
+            # Формирование полного ответа
+            if remaining_hour is not None and remaining_day is not None:
+                full_response = f"{response}\n\n📊 Осталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+            else:
+                full_response = response
             
-            # Безопасная отправка без принудительного Markdown
+            # Попытка 1: отправка как есть (без принудительного парсинга)
             try:
                 await update.message.reply_text(full_response)
                 logger.info(f"Message sent successfully to user {user_id}")
+                return
             except Exception as e:
-                logger.error(f"Failed to send message to user {user_id}: {e}")
-                # Попытка отправить без эмодзи и спецсимволов
-                simple_response = f"Ответ: {response}\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в час, {remaining_day}/{DAILY_LIMIT} в день"
+                logger.warning(f"First send attempt failed for user {user_id}: {e}")
+            
+            # Попытка 2: без эмодзи
+            try:
+                if remaining_hour is not None and remaining_day is not None:
+                    simple_response = f"{response}\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+                else:
+                    simple_response = response
                 await update.message.reply_text(simple_response)
-        else:
-            await update.message.reply_text("❌ Произошла ошибка при обращении к AI. Попробуйте позже.")
+                logger.info(f"Message sent successfully (without emoji) to user {user_id}")
+                return
+            except Exception as e:
+                logger.warning(f"Second send attempt failed for user {user_id}: {e}")
+            
+            # Попытка 3: только основной ответ
+            try:
+                await update.message.reply_text(response)
+                logger.info(f"Message sent successfully (response only) to user {user_id}")
+                return
+            except Exception as e:
+                logger.warning(f"Third send attempt failed for user {user_id}: {e}")
+            
+            # Попытка 4: экранированный ответ
+            try:
+                escaped_response = response.replace('.', '\\.')
+                await update.message.reply_text(escaped_response)
+                logger.info(f"Message sent successfully (escaped) to user {user_id}")
+                return
+            except Exception as e:
+                logger.warning(f"Fourth send attempt failed for user {user_id}: {e}")
+            
+            # Попытка 5: крайний случай - общее сообщение об ошибке
+            await update.message.reply_text("Ответ получен, но произошла ошибка при отправке. Попробуйте еще раз.")
+            logger.error(f"All send attempts failed for user {user_id}, sent generic error message")
+            
+        except Exception as e:
+            logger.error(f"Critical error in safe_send_message for user {user_id}: {e}")
 
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка изображений"""
         user_id = update.effective_user.id
+        
+        logger.info(f"Received photo from user {user_id}")
         
         # Проверка лимитов
         if not self.can_make_request(user_id):
@@ -324,24 +384,15 @@ class GeminiBot:
                 # Получение оставшихся запросов
                 remaining_hour, remaining_day = self.get_remaining_requests(user_id)
                 
-                # Отправка ответа с лимитами
-                full_response = f"{response}\n\n📊 Осталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
-                
-                # Безопасная отправка
-                try:
-                    await update.message.reply_text(full_response)
-                    logger.info(f"Image analysis response sent successfully to user {user_id}")
-                except Exception as e:
-                    logger.error(f"Failed to send image analysis response to user {user_id}: {e}")
-                    # Попытка отправить простой ответ
-                    simple_response = f"Анализ изображения: {response}\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в час, {remaining_day}/{DAILY_LIMIT} в день"
-                    await update.message.reply_text(simple_response)
+                # Безопасная отправка ответа
+                await self.safe_send_message(update, response, remaining_hour, remaining_day, user_id)
             else:
-                await update.message.reply_text("❌ Произошла ошибка при анализе изображения. Попробуйте позже.")
+                logger.error(f"No response received from Gemini API for image analysis from user {user_id}")
+                await self.safe_send_message(update, "❌ Произошла ошибка при анализе изображения. Попробуйте позже.", None, None, user_id)
                 
         except Exception as e:
-            logger.error(f"Error handling photo: {e}")
-            await update.message.reply_text("❌ Произошла ошибка при обработке изображения.")
+            logger.error(f"Error handling photo from user {user_id}: {e}")
+            await self.safe_send_message(update, "❌ Произошла ошибка при обработке изображения.", None, None, user_id)
 
     def is_markdown(self, text: str) -> bool:
         """Проверка наличия markdown в тексте (не используется)"""
@@ -394,40 +445,71 @@ async def run_bot():
     await application.initialize()
     await application.start()
     
-    # Принудительная очистка webhook и предыдущих подключений
-    try:
-        logger.info("Clearing webhook and previous connections...")
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        await asyncio.sleep(2)  # Пауза для полной очистки
-        logger.info("Webhook cleared successfully")
-    except Exception as e:
-        logger.warning(f"Could not clear webhook: {e}")
+    # Агрессивная очистка webhook и предыдущих подключений
+    logger.info("Performing aggressive webhook cleanup...")
+    cleanup_attempts = 5
+    for attempt in range(cleanup_attempts):
+        try:
+            logger.info(f"Webhook cleanup attempt {attempt + 1}/{cleanup_attempts}")
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(2)
+            
+            # Дополнительная попытка очистки
+            await application.bot.delete_webhook()
+            await asyncio.sleep(1)
+            
+            logger.info(f"Webhook cleanup attempt {attempt + 1} completed")
+            break
+        except Exception as e:
+            logger.warning(f"Webhook cleanup attempt {attempt + 1} failed: {e}")
+            if attempt < cleanup_attempts - 1:
+                await asyncio.sleep(3)
     
-    # Запуск polling с retry механизмом
-    max_retries = 3
+    logger.info("Waiting for complete cleanup...")
+    await asyncio.sleep(5)  # Дополнительная пауза для полной очистки
+    
+    # Запуск polling с улучшенным retry механизмом
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             logger.info(f"Starting polling (attempt {attempt + 1}/{max_retries})...")
+            
+            # Дополнительная очистка перед каждой попыткой
+            if attempt > 0:
+                logger.info("Additional cleanup before retry...")
+                try:
+                    await application.bot.delete_webhook(drop_pending_updates=True)
+                    await asyncio.sleep(2)
+                except:
+                    pass
+            
             await application.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES, 
                 drop_pending_updates=True,
-                timeout=30,
-                pool_timeout=30
+                timeout=45,
+                pool_timeout=45,
+                connect_timeout=30,
+                read_timeout=30
             )
             logger.info("Polling started successfully")
             break
         except Exception as e:
             logger.error(f"Polling failed on attempt {attempt + 1}: {e}")
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 10
+                wait_time = (attempt + 1) * 15  # Увеличиваем время ожидания
                 logger.info(f"Waiting {wait_time} seconds before retry...")
                 await asyncio.sleep(wait_time)
             else:
-                logger.error("All polling attempts failed")
+                logger.error("All polling attempts failed - this indicates a serious configuration issue")
+                logger.error("Possible causes:")
+                logger.error("1. Bot token is being used by another instance")
+                logger.error("2. Webhook is set externally")
+                logger.error("3. Network connectivity issues")
                 return
     
     # Поддержание работы
     try:
+        logger.info("Bot is now running and waiting for messages...")
         await asyncio.Event().wait()
     except KeyboardInterrupt:
         logger.info("Stopping bot...")
