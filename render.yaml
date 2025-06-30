@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gemini-telegram-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: AI_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: PORT
+        value: 8000
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+    autoDeploy: true
+    branch: main 
