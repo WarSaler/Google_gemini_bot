@@ -5,6 +5,7 @@ WORKDIR /app
 # Установка системных зависимостей
 RUN apt-get update && apt-get install -y \
     gcc \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование файлов зависимостей

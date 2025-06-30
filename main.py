@@ -641,27 +641,52 @@ async def run_bot():
     await application.start()
     
     # Агрессивная очистка webhook и предыдущих подключений
-    logger.info("Performing aggressive webhook cleanup...")
-    cleanup_attempts = 5
+    logger.info("Performing ULTRA-aggressive webhook cleanup...")
+    
+    # Принудительная остановка всех предыдущих экземпляров
+    try:
+        logger.info("Force clearing all pending updates...")
+        # Получаем и очищаем все pending updates
+        try:
+            updates = await application.bot.get_updates(timeout=1, limit=100)
+            if updates:
+                logger.info(f"Found {len(updates)} pending updates - clearing...")
+                # Получаем последний update_id для пропуска
+                last_update_id = updates[-1].update_id
+                await application.bot.get_updates(offset=last_update_id + 1, timeout=1)
+        except Exception as e:
+            logger.info(f"Pending updates clear attempt: {e}")
+    except Exception as e:
+        logger.warning(f"Force clear failed: {e}")
+    
+    cleanup_attempts = 8  # Увеличено с 5 до 8
     for attempt in range(cleanup_attempts):
         try:
             logger.info(f"Webhook cleanup attempt {attempt + 1}/{cleanup_attempts}")
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(2)
             
-            # Дополнительная попытка очистки
+            # Множественная очистка webhook
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(1)
             await application.bot.delete_webhook()
             await asyncio.sleep(1)
             
+            # Дополнительная очистка с различными параметрами
+            try:
+                await application.bot.set_webhook("")  # Пустой webhook
+                await asyncio.sleep(1)
+                await application.bot.delete_webhook(drop_pending_updates=True)
+            except:
+                pass
+                
             logger.info(f"Webhook cleanup attempt {attempt + 1} completed")
             break
         except Exception as e:
             logger.warning(f"Webhook cleanup attempt {attempt + 1} failed: {e}")
             if attempt < cleanup_attempts - 1:
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)  # Увеличено время ожидания
     
-    logger.info("Waiting for complete cleanup...")
-    await asyncio.sleep(5)  # Дополнительная пауза для полной очистки
+    logger.info("Waiting for COMPLETE cleanup...")
+    await asyncio.sleep(10)  # Увеличено с 5 до 10 секунд
     
     # Запуск polling с улучшенным retry механизмом
     max_retries = 5
