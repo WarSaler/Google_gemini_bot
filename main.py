@@ -44,7 +44,7 @@ class GeminiBot:
 
 Я могу помочь вам с:
 • 💬 Ответами на текстовые вопросы
-• 🖼️ Анализом изображений
+• 🖼️ Анализом изображений (НЕ создаю картинки!)
 • 💻 Работой с кодом
 
 Доступные команды:
@@ -52,6 +52,8 @@ class GeminiBot:
 /help - Справка по командам  
 /clear - Очистить историю чата
 /limits - Показать лимиты запросов
+
+⚠️ ВАЖНО: Я могу только анализировать изображения и рассказать что на них, но НЕ МОГУ создавать или редактировать картинки!
 
 Просто отправьте мне сообщение или изображение, и я помогу вам!"""
         
@@ -70,6 +72,11 @@ class GeminiBot:
 • Отправьте текстовое сообщение для получения ответа
 • Отправьте изображение с подписью или без для анализа
 • Отправьте код для его анализа или объяснения
+
+⚠️ ВАЖНО про изображения:
+• Я АНАЛИЗИРУЮ изображения (описываю что вижу)
+• Я НЕ СОЗДАЮ новые картинки или фото
+• Я НЕ РЕДАКТИРУЮ существующие изображения
 
 ⚡ Лимиты:
 • 15 запросов в час
@@ -162,20 +169,30 @@ class GeminiBot:
         
         try:
             async with aiohttp.ClientSession() as session:
+                logger.debug(f"Sending request to Gemini API...")
                 async with session.post(
                     f"{GEMINI_API_URL}?key={AI_API_KEY}",
                     headers=headers,
                     json=payload
                 ) as response:
+                    logger.debug(f"Gemini API responded with status: {response.status}")
                     if response.status == 200:
                         data = await response.json()
                         if 'candidates' in data and len(data['candidates']) > 0:
-                            return data['candidates'][0]['content']['parts'][0]['text']
+                            result = data['candidates'][0]['content']['parts'][0]['text']
+                            logger.info(f"Gemini API success: received {len(result)} characters")
+                            return result
+                        else:
+                            logger.error(f"Gemini API: No candidates in response. Full response: {data}")
+                            return None
                     else:
-                        logger.error(f"API Error: {response.status}, {await response.text()}")
+                        error_text = await response.text()
+                        logger.error(f"Gemini API Error: {response.status}")
+                        logger.error(f"Error details: {error_text}")
                         return None
         except Exception as e:
             logger.error(f"Exception calling Gemini API: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,9 +227,11 @@ class GeminiBot:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
         # Вызов API
+        logger.info(f"Calling Gemini API for user {user_id} with {len(messages)} messages")
         response = await self.call_gemini_api(messages)
         
         if response:
+            logger.info(f"Received response from Gemini API for user {user_id}: {len(response)} characters")
             # Добавление запроса в счетчик
             self.add_request(user_id)
             
@@ -229,7 +248,15 @@ class GeminiBot:
             # Отправка ответа с лимитами
             full_response = f"{response}\n\n📊 Осталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
             
-            await update.message.reply_text(full_response, parse_mode=ParseMode.MARKDOWN_V2 if self.is_markdown(response) else None)
+            # Безопасная отправка без принудительного Markdown
+            try:
+                await update.message.reply_text(full_response)
+                logger.info(f"Message sent successfully to user {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to send message to user {user_id}: {e}")
+                # Попытка отправить без эмодзи и спецсимволов
+                simple_response = f"Ответ: {response}\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в час, {remaining_day}/{DAILY_LIMIT} в день"
+                await update.message.reply_text(simple_response)
         else:
             await update.message.reply_text("❌ Произошла ошибка при обращении к AI. Попробуйте позже.")
 
@@ -278,9 +305,12 @@ class GeminiBot:
             })
 
             # Вызов API
+            logger.info(f"Calling Gemini API for image analysis from user {user_id}")
             response = await self.call_gemini_api(messages)
             
             if response:
+                logger.info(f"Received image analysis response for user {user_id}: {len(response)} characters")
+                
                 # Добавление запроса в счетчик
                 self.add_request(user_id)
                 
@@ -297,7 +327,15 @@ class GeminiBot:
                 # Отправка ответа с лимитами
                 full_response = f"{response}\n\n📊 Осталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
                 
-                await update.message.reply_text(full_response)
+                # Безопасная отправка
+                try:
+                    await update.message.reply_text(full_response)
+                    logger.info(f"Image analysis response sent successfully to user {user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send image analysis response to user {user_id}: {e}")
+                    # Попытка отправить простой ответ
+                    simple_response = f"Анализ изображения: {response}\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в час, {remaining_day}/{DAILY_LIMIT} в день"
+                    await update.message.reply_text(simple_response)
             else:
                 await update.message.reply_text("❌ Произошла ошибка при анализе изображения. Попробуйте позже.")
                 
@@ -306,9 +344,9 @@ class GeminiBot:
             await update.message.reply_text("❌ Произошла ошибка при обработке изображения.")
 
     def is_markdown(self, text: str) -> bool:
-        """Проверка наличия markdown в тексте"""
-        markdown_indicators = ['```', '**', '*', '_', '`', '[', ']', '(', ')']
-        return any(indicator in text for indicator in markdown_indicators)
+        """Проверка наличия markdown в тексте (не используется)"""
+        # Функция оставлена для совместимости, но не используется
+        return False
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
