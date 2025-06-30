@@ -5,7 +5,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Render использует переменную PORT, fallback на 8000 для локальной разработки
 PORT = int(os.getenv('PORT', 8000))
+logger.info(f"Keep-alive server will use port: {PORT}")
 
 async def health_check(request):
     """Health check endpoint для Render"""

@@ -312,7 +312,25 @@ class GeminiBot:
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
-    logger.error(f"Exception while handling an update: {context.error}")
+    import traceback
+    
+    error_msg = f"Exception while handling an update: {context.error}"
+    
+    # Специальная обработка для конфликта экземпляров
+    if "Conflict" in str(context.error) and "getUpdates" in str(context.error):
+        logger.error("CONFLICT DETECTED: Multiple bot instances running!")
+        logger.error("This usually means:")
+        logger.error("1. Bot is running locally while also on Render")
+        logger.error("2. Multiple Render deployments with same token")
+        logger.error("3. Webhook was not properly cleared")
+        return
+    
+    logger.error(error_msg)
+    logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    # Если есть update, логируем его для отладки
+    if update:
+        logger.error(f"Update that caused error: {update}")
 
 async def run_bot():
     """Запуск бота"""
@@ -337,7 +355,38 @@ async def run_bot():
     logger.info("Starting bot...")
     await application.initialize()
     await application.start()
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    
+    # Принудительная очистка webhook и предыдущих подключений
+    try:
+        logger.info("Clearing webhook and previous connections...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        await asyncio.sleep(2)  # Пауза для полной очистки
+        logger.info("Webhook cleared successfully")
+    except Exception as e:
+        logger.warning(f"Could not clear webhook: {e}")
+    
+    # Запуск polling с retry механизмом
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Starting polling (attempt {attempt + 1}/{max_retries})...")
+            await application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES, 
+                drop_pending_updates=True,
+                timeout=30,
+                pool_timeout=30
+            )
+            logger.info("Polling started successfully")
+            break
+        except Exception as e:
+            logger.error(f"Polling failed on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 10
+                logger.info(f"Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error("All polling attempts failed")
+                return
     
     # Поддержание работы
     try:
@@ -349,11 +398,20 @@ async def run_bot():
 
 async def main():
     """Основная функция"""
+    logger.info("Starting Gemini Telegram Bot...")
+    
+    # Небольшая задержка для стабильности
+    await asyncio.sleep(1)
+    
     # Запуск HTTP сервера и бота параллельно
-    await asyncio.gather(
-        start_server(),
-        run_bot()
-    )
+    try:
+        await asyncio.gather(
+            start_server(),
+            run_bot()
+        )
+    except Exception as e:
+        logger.error(f"Critical error in main: {e}")
+        raise
 
 if __name__ == '__main__':
     asyncio.run(main()) 
