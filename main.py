@@ -490,22 +490,8 @@ class GeminiBot:
             
             logger.info(f"Voice transcribed for user {user_id}: {transcribed_text[:100]}...")
             
-            # Добавление расшифровки в историю
-            user_sessions[user_id].append({
-                'role': 'user',
-                'content': f"[Голосовое сообщение]: {transcribed_text}",
-                'timestamp': datetime.now()
-            })
-
-            # Подготовка сообщения для Gemini API
+            # Подготовка сообщения для Gemini API (БЕЗ контекста истории для независимых ответов)
             messages = [{'text': transcribed_text}]
-            
-            # Добавление контекста из истории
-            for session_msg in list(user_sessions[user_id])[-10:]:  # Последние 10 сообщений
-                if session_msg['role'] == 'user':
-                    messages.insert(0, {'text': f"Пользователь: {session_msg['content']}"})
-                else:
-                    messages.insert(0, {'text': f"Ассистент: {session_msg['content']}"})
 
             # Отправка уведомления о том, что речь распознана
             await update.message.reply_text(f"✅ Распознано: \"{transcribed_text}\"\n\n💭 Думаю над ответом...")
@@ -519,19 +505,14 @@ class GeminiBot:
                 # Добавление запроса в счетчик
                 self.add_request(user_id)
                 
-                # Добавление ответа в историю
-                user_sessions[user_id].append({
-                    'role': 'assistant',
-                    'content': response,
-                    'timestamp': datetime.now()
-                })
+                # Добавление в историю только если нужно (для обычных сообщений)
+                # Голосовые сообщения теперь независимы и не сохраняются в историю
                 
                 # Получение оставшихся запросов
                 remaining_minute, remaining_day = self.get_remaining_requests(user_id)
                 
-                # Отправка ответа с информацией о распознанной речи
-                full_response = f"🎤 **Ваше сообщение:** {transcribed_text}\n\n📝 **Мой ответ:** {response}"
-                await self.safe_send_message(update, full_response, remaining_minute, remaining_day, user_id)
+                # Отправка только ответа AI (без дублирования расшифровки)
+                await self.safe_send_message(update, response, remaining_minute, remaining_day, user_id)
             else:
                 logger.error(f"No response received from Gemini API for voice message from user {user_id}")
                 await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
