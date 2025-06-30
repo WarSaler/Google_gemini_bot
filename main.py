@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 AI_API_KEY = os.getenv('AI_API_KEY')
-GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
+GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 
-# Лимиты запросов
-HOURLY_LIMIT = 15
-DAILY_LIMIT = 1500
+# Лимиты запросов (официальные лимиты Google Gemini 2.5 Flash Free Tier)
+MINUTE_LIMIT = 10  # 10 запросов в минуту
+DAILY_LIMIT = 250  # 250 запросов в день
 
 # Хранилище данных
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
-request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'hour': [], 'day': []})
+request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
 
 class GeminiBot:
     def __init__(self):
@@ -79,8 +79,8 @@ class GeminiBot:
 • Я НЕ РЕДАКТИРУЮ существующие изображения
 
 ⚡ Лимиты:
-• 15 запросов в час
-• 1500 запросов в сутки
+• 10 запросов в минуту
+• 250 запросов в день
 
 История чата сохраняется (последние 50 сообщений) для контекста разговора."""
         
@@ -95,11 +95,11 @@ class GeminiBot:
     async def limits_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /limits"""
         user_id = update.effective_user.id
-        remaining_hour, remaining_day = self.get_remaining_requests(user_id)
+        remaining_minute, remaining_day = self.get_remaining_requests(user_id)
         
         limits_message = f"""📊 Ваши текущие лимиты:
 
-🕐 В этом часе: {remaining_hour}/{HOURLY_LIMIT}
+🕐 В этой минуте: {remaining_minute}/{MINUTE_LIMIT}
 📅 Сегодня: {remaining_day}/{DAILY_LIMIT}
 
 Лимиты обновляются автоматически."""
@@ -109,13 +109,13 @@ class GeminiBot:
     def clean_old_requests(self, user_id: int):
         """Очистка старых запросов"""
         now = datetime.now()
-        hour_ago = now - timedelta(hours=1)
+        minute_ago = now - timedelta(minutes=1)
         day_ago = now - timedelta(days=1)
         
-        # Очистка часовых запросов
-        request_counts[user_id]['hour'] = [
-            req_time for req_time in request_counts[user_id]['hour'] 
-            if req_time > hour_ago
+        # Очистка минутных запросов
+        request_counts[user_id]['minute'] = [
+            req_time for req_time in request_counts[user_id]['minute'] 
+            if req_time > minute_ago
         ]
         
         # Очистка дневных запросов
@@ -128,23 +128,23 @@ class GeminiBot:
         """Получение оставшихся запросов"""
         self.clean_old_requests(user_id)
         
-        hour_count = len(request_counts[user_id]['hour'])
+        minute_count = len(request_counts[user_id]['minute'])
         day_count = len(request_counts[user_id]['day'])
         
-        remaining_hour = max(0, HOURLY_LIMIT - hour_count)
+        remaining_minute = max(0, MINUTE_LIMIT - minute_count)
         remaining_day = max(0, DAILY_LIMIT - day_count)
         
-        return remaining_hour, remaining_day
+        return remaining_minute, remaining_day
 
     def can_make_request(self, user_id: int) -> bool:
         """Проверка возможности сделать запрос"""
-        remaining_hour, remaining_day = self.get_remaining_requests(user_id)
-        return remaining_hour > 0 and remaining_day > 0
+        remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+        return remaining_minute > 0 and remaining_day > 0
 
     def add_request(self, user_id: int):
         """Добавление запроса в счетчик"""
         now = datetime.now()
-        request_counts[user_id]['hour'].append(now)
+        request_counts[user_id]['minute'].append(now)
         request_counts[user_id]['day'].append(now)
 
     async def call_gemini_api(self, messages: List[dict]) -> Optional[str]:
@@ -204,9 +204,9 @@ class GeminiBot:
         
         # Проверка лимитов
         if not self.can_make_request(user_id):
-            remaining_hour, remaining_day = self.get_remaining_requests(user_id)
+            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
             await update.message.reply_text(
-                f"❌ Превышен лимит запросов!\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+                f"❌ Превышен лимит запросов!\n\nОсталось запросов: {remaining_minute}/{MINUTE_LIMIT} в этой минуте, {remaining_day}/{DAILY_LIMIT} сегодня."
             )
             return
 
@@ -257,20 +257,20 @@ class GeminiBot:
             })
             
             # Получение оставшихся запросов
-            remaining_hour, remaining_day = self.get_remaining_requests(user_id)
+            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
             
             # Отправка ответа с безопасной обработкой
-            await self.safe_send_message(update, response, remaining_hour, remaining_day, user_id)
+            await self.safe_send_message(update, response, remaining_minute, remaining_day, user_id)
         else:
             logger.error(f"No response received from Gemini API for user {user_id}")
             await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
 
-    async def safe_send_message(self, update: Update, response: str, remaining_hour: int = None, remaining_day: int = None, user_id: int = None):
+    async def safe_send_message(self, update: Update, response: str, remaining_minute: int = None, remaining_day: int = None, user_id: int = None):
         """Безопасная отправка сообщения с множественными fallback вариантами"""
         try:
             # Формирование полного ответа
-            if remaining_hour is not None and remaining_day is not None:
-                full_response = f"{response}\n\n📊 Осталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+            if remaining_minute is not None and remaining_day is not None:
+                full_response = f"{response}\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в этой минуте, {remaining_day}/{DAILY_LIMIT} сегодня."
             else:
                 full_response = response
             
@@ -284,8 +284,8 @@ class GeminiBot:
             
             # Попытка 2: без эмодзи
             try:
-                if remaining_hour is not None and remaining_day is not None:
-                    simple_response = f"{response}\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+                if remaining_minute is not None and remaining_day is not None:
+                    simple_response = f"{response}\n\nОсталось запросов: {remaining_minute}/{MINUTE_LIMIT} в этой минуте, {remaining_day}/{DAILY_LIMIT} сегодня."
                 else:
                     simple_response = response
                 await update.message.reply_text(simple_response)
@@ -326,9 +326,9 @@ class GeminiBot:
         
         # Проверка лимитов
         if not self.can_make_request(user_id):
-            remaining_hour, remaining_day = self.get_remaining_requests(user_id)
+            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
             await update.message.reply_text(
-                f"❌ Превышен лимит запросов!\n\nОсталось запросов: {remaining_hour}/{HOURLY_LIMIT} в этом часе, {remaining_day}/{DAILY_LIMIT} сегодня."
+                f"❌ Превышен лимит запросов!\n\nОсталось запросов: {remaining_minute}/{MINUTE_LIMIT} в этой минуте, {remaining_day}/{DAILY_LIMIT} сегодня."
             )
             return
 
@@ -382,10 +382,10 @@ class GeminiBot:
                 })
                 
                 # Получение оставшихся запросов
-                remaining_hour, remaining_day = self.get_remaining_requests(user_id)
+                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
                 
                 # Безопасная отправка ответа
-                await self.safe_send_message(update, response, remaining_hour, remaining_day, user_id)
+                await self.safe_send_message(update, response, remaining_minute, remaining_day, user_id)
             else:
                 logger.error(f"No response received from Gemini API for image analysis from user {user_id}")
                 await self.safe_send_message(update, "❌ Произошла ошибка при анализе изображения. Попробуйте позже.", None, None, user_id)
