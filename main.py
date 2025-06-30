@@ -421,6 +421,54 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     if update:
         logger.error(f"Update that caused error: {update}")
 
+async def watchdog():
+    """Функция watchdog для мониторинга здоровья бота и предотвращения засыпания"""
+    start_time = datetime.now()
+    last_activity = datetime.now()
+    
+    while True:
+        try:
+            await asyncio.sleep(180)  # Каждые 3 минуты
+            
+            current_time = datetime.now()
+            uptime = current_time - start_time
+            
+            # Логирование активности для предотвращения засыпания
+            logger.info(f"🔍 Bot Watchdog: Uptime {uptime}, Last activity: {current_time}")
+            logger.info(f"📊 Active users: {len(user_sessions)}, Total request counters: {len(request_counts)}")
+            
+            # Очистка старых данных для экономии памяти
+            if current_time.minute % 10 == 0:  # Каждые 10 минут
+                logger.info("🧹 Cleaning old session data...")
+                cleanup_old_data()
+                
+        except Exception as e:
+            logger.error(f"Watchdog error: {e}")
+
+def cleanup_old_data():
+    """Очистка старых данных сессий"""
+    now = datetime.now()
+    cutoff = now - timedelta(hours=24)
+    
+    # Очистка старых пользовательских сессий
+    users_to_remove = []
+    for user_id, session in user_sessions.items():
+        if session and len(session) > 0:
+            # Если последнее сообщение очень старое, удаляем сессию
+            try:
+                if session[-1].get('timestamp', now) < cutoff:
+                    users_to_remove.append(user_id)
+            except (AttributeError, IndexError):
+                # Если структура данных неправильная, очищаем
+                users_to_remove.append(user_id)
+    
+    for user_id in users_to_remove:
+        del user_sessions[user_id]
+        logger.debug(f"Cleaned old session for user {user_id}")
+    
+    if users_to_remove:
+        logger.info(f"🧹 Cleaned {len(users_to_remove)} old user sessions")
+
 async def run_bot():
     """Запуск бота"""
     if not TELEGRAM_TOKEN or not AI_API_KEY:
@@ -523,14 +571,19 @@ async def main():
     # Небольшая задержка для стабильности
     await asyncio.sleep(1)
     
-    # Запуск HTTP сервера и бота параллельно
+    # Запуск HTTP сервера, бота и watchdog параллельно
     try:
+        logger.info("🚀 Starting all services: HTTP server + Bot + Watchdog...")
         await asyncio.gather(
             start_server(),
-            run_bot()
+            run_bot(),
+            watchdog()
         )
     except Exception as e:
         logger.error(f"Critical error in main: {e}")
+        # Попытка перезапуска через 30 секунд
+        logger.info("Attempting restart in 30 seconds...")
+        await asyncio.sleep(30)
         raise
 
 if __name__ == '__main__':
