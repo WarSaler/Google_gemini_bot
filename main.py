@@ -106,14 +106,14 @@ class GeminiBot:
         day_ago = now - timedelta(days=1)
         
         # Очистка часовых запросов
-        self.request_counts[user_id]['hour'] = [
-            req_time for req_time in self.request_counts[user_id]['hour'] 
+        request_counts[user_id]['hour'] = [
+            req_time for req_time in request_counts[user_id]['hour'] 
             if req_time > hour_ago
         ]
         
         # Очистка дневных запросов
-        self.request_counts[user_id]['day'] = [
-            req_time for req_time in self.request_counts[user_id]['day'] 
+        request_counts[user_id]['day'] = [
+            req_time for req_time in request_counts[user_id]['day'] 
             if req_time > day_ago
         ]
 
@@ -121,8 +121,8 @@ class GeminiBot:
         """Получение оставшихся запросов"""
         self.clean_old_requests(user_id)
         
-        hour_count = len(self.request_counts[user_id]['hour'])
-        day_count = len(self.request_counts[user_id]['day'])
+        hour_count = len(request_counts[user_id]['hour'])
+        day_count = len(request_counts[user_id]['day'])
         
         remaining_hour = max(0, HOURLY_LIMIT - hour_count)
         remaining_day = max(0, DAILY_LIMIT - day_count)
@@ -137,8 +137,8 @@ class GeminiBot:
     def add_request(self, user_id: int):
         """Добавление запроса в счетчик"""
         now = datetime.now()
-        self.request_counts[user_id]['hour'].append(now)
-        self.request_counts[user_id]['day'].append(now)
+        request_counts[user_id]['hour'].append(now)
+        request_counts[user_id]['day'].append(now)
 
     async def call_gemini_api(self, messages: List[dict]) -> Optional[str]:
         """Вызов API Gemini"""
