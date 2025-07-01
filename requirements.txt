@@ -7,4 +7,5 @@ requests==2.31.0
 gTTS==2.5.4
 wikipedia==1.4.0
 newsapi-python==0.2.7
-pytz==2024.1 
+pytz==2024.1
+Brotli==1.1.0 

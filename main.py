@@ -276,21 +276,40 @@ class GeminiBot:
                         if 'candidates' in data and len(data['candidates']) > 0:
                             candidate = data['candidates'][0]
                             
-                            # Безопасная проверка структуры ответа
+                            # Безопасная проверка структуры ответа с улучшенной обработкой ошибок
                             if 'content' in candidate:
                                 content = candidate['content']
+                                logger.debug(f"Gemini API content keys: {list(content.keys())}")
+                                
                                 if 'parts' in content and len(content['parts']) > 0:
                                     part = content['parts'][0]
-                                    if 'text' in part:
+                                    logger.debug(f"Gemini API part keys: {list(part.keys())}")
+                                    
+                                    if 'text' in part and part['text']:
                                         result = part['text']
                                         logger.info(f"Gemini API success: received {len(result)} characters")
                                         return result
                                     else:
-                                        logger.error(f"Gemini API: No 'text' in parts. Part structure: {list(part.keys())}")
+                                        logger.error(f"Gemini API: No 'text' in parts or empty text. Part structure: {list(part.keys())}")
+                                        logger.error(f"Part content: {part}")
                                 else:
                                     logger.error(f"Gemini API: No 'parts' in content. Content structure: {list(content.keys())}")
+                                    logger.error(f"Full content: {content}")
+                                    
+                                    # Попытка альтернативной структуры ответа
+                                    if 'text' in content:
+                                        result = content['text']
+                                        logger.info(f"Gemini API alternative structure success: received {len(result)} characters")
+                                        return result
                             else:
                                 logger.error(f"Gemini API: No 'content' in candidate. Candidate structure: {list(candidate.keys())}")
+                                logger.error(f"Full candidate: {candidate}")
+                                
+                                # Проверяем альтернативные структуры ответа
+                                if 'text' in candidate:
+                                    result = candidate['text']
+                                    logger.info(f"Gemini API direct text success: received {len(result)} characters")
+                                    return result
                         else:
                             logger.error(f"Gemini API: No candidates in response. Full response: {data}")
                         return None
@@ -951,9 +970,15 @@ class GeminiBot:
         logger.info(f"Starting alternative web search for: {query[:50]}...")
         
         # Если это запрос о валютах, используем специальный поиск
-        if self.is_currency_query(query):
+        if self.is_currency_query(query) and not self.is_politics_query(query):
             logger.info("Currency query detected, using specialized currency search")
             return await self.search_currency_rates(query)
+        
+        # Если это политический запрос, не ищем валютную информацию
+        if self.is_politics_query(query):
+            logger.info("Politics query detected, skipping currency search in DuckDuckGo")
+            # Проводим только политический поиск
+            query = f"политика россия {query}"
         
         try:
             # Несколько разных подходов к поиску
@@ -965,7 +990,7 @@ class GeminiBot:
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                         'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Accept-Encoding': 'gzip, deflate',  # Убираем br (brotli) чтобы избежать ошибок
                         'DNT': '1',
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1'
@@ -1147,7 +1172,7 @@ class GeminiBot:
         return None
     
     async def search_news(self, query: str) -> Optional[str]:
-        """Улучшенный поиск актуальных новостей через NewsAPI"""
+        """Улучшенный поиск актуальных новостей через NewsAPI с поддержкой 10+ политических новостей"""
         logger.info(f"Starting News search for: {query[:50]}...")
         
         if not self.news_client:
@@ -1157,9 +1182,26 @@ class GeminiBot:
         try:
             # Интеллектуальная логика поиска для разных типов запросов
             search_queries = []
+            max_articles_per_query = 3  # По умолчанию
+            max_total_articles = 6     # По умолчанию
+            articles_per_search = 2    # По умолчанию
             
+            # Для политических запросов - МАКСИМУМ статей
+            if self.is_politics_query(query):
+                search_queries = [
+                    'политика россия',
+                    'правительство россия',
+                    'госдума новости',
+                    'российская политика',
+                    'внутренняя политика',
+                    'кремль политика'
+                ]
+                max_articles_per_query = 6  # Больше статей на запрос
+                max_total_articles = 15     # Больше общих статей
+                articles_per_search = 4     # Больше статей с каждого поиска
+                logger.info("Politics news search queries prepared - targeting 10+ articles")
             # Для валютных запросов
-            if self.is_currency_query(query):
+            elif self.is_currency_query(query):
                 search_queries = [
                     'курс доллара',
                     'курс евро',
@@ -1167,16 +1209,22 @@ class GeminiBot:
                     'курс рубля',
                     'экономика валюта'
                 ]
+                max_articles_per_query = 4
+                max_total_articles = 8
+                articles_per_search = 3
                 logger.info("Currency news search queries prepared")
             # Для общих запросов о новостях
             elif any(word in query.lower() for word in ['новости', 'последние', 'актуальные', 'сегодня', 'происходит']):
                 search_queries = [
-                    'россия',
-                    'мир',
-                    'экономика',
-                    'политика',
-                    'технологии'
+                    'россия новости',
+                    'мировые новости',
+                    'актуальные события',
+                    'российские новости',
+                    'политика экономика'
                 ]
+                max_articles_per_query = 5
+                max_total_articles = 12
+                articles_per_search = 3
             # Для экономических запросов
             elif any(word in query.lower() for word in ['экономика', 'рынок', 'финансы', 'бизнес']):
                 search_queries = [
@@ -1184,37 +1232,44 @@ class GeminiBot:
                     'финансовые рынки',
                     'бизнес новости'
                 ]
+                max_articles_per_query = 4
+                max_total_articles = 8
+                articles_per_search = 3
             else:
                 # Для специфических запросов
                 search_queries = [query]
             
             all_articles = []
             
-            for search_query in search_queries[:3]:  # Увеличиваем до 3 запросов для валют
+            # Увеличиваем количество поисковых запросов для политических новостей
+            max_searches = 6 if self.is_politics_query(query) else 4
+            
+            for search_query in search_queries[:max_searches]:
                 try:
-                    from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+                    from_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')  # Более свежие новости
                     logger.info(f"NewsAPI: Searching '{search_query}' from {from_date}")
                     
                     news = self.news_client.get_everything(
                         q=search_query,
                         language='ru',
                         sort_by='publishedAt',
-                        page_size=3,  # Увеличиваем количество статей
+                        page_size=max_articles_per_query,  # Больше статей
                         from_param=from_date
                     )
                     
                     logger.info(f"NewsAPI '{search_query}': {news.get('totalResults', 0)} results")
                     
                     if news['articles']:
-                        for article in news['articles'][:2]:
+                        for article in news['articles'][:articles_per_search]:
                             title = article.get('title', '')
                             description = article.get('description', '')
                             published = article.get('publishedAt', '')
                             source = article.get('source', {}).get('name', '')
                             
-                            if title and title not in [a.split(':')[0] for a in all_articles]:
+                            # Проверяем, что статья не дублируется
+                            if title and title not in [a.split('📰')[1].split(':')[0].strip() if '📰' in a else a.split(':')[0] for a in all_articles]:
                                 article_text = f"📰 {title}"
-                                if description and len(description) < 150:
+                                if description and len(description) < 200:  # Увеличили лимит описания
                                     article_text += f": {description}"
                                 if published:
                                     date = published.split('T')[0]
@@ -1228,13 +1283,18 @@ class GeminiBot:
                     continue
             
             if all_articles:
-                # Ограничиваем до 4 самых актуальных новостей
-                final_articles = all_articles[:4]
-                logger.info(f"NewsAPI search completed: {len(final_articles)} articles found")
-                
-                if self.is_currency_query(query):
+                # Для политических запросов возвращаем больше статей
+                if self.is_politics_query(query):
+                    final_articles = all_articles[:12]  # До 12 политических новостей
+                    logger.info(f"NewsAPI politics search completed: {len(final_articles)} articles found")
+                    return f"🏛️ ПОЛИТИЧЕСКИЕ НОВОСТИ (найдено {len(final_articles)}):\n\n" + '\n\n'.join(final_articles)
+                elif self.is_currency_query(query):
+                    final_articles = all_articles[:6]
+                    logger.info(f"NewsAPI currency search completed: {len(final_articles)} articles found")
                     return f"💰 ФИНАНСОВЫЕ НОВОСТИ:\n\n" + '\n\n'.join(final_articles)
                 else:
+                    final_articles = all_articles[:8]  # Больше общих новостей
+                    logger.info(f"NewsAPI general search completed: {len(final_articles)} articles found")
                     return f"📰 АКТУАЛЬНЫЕ НОВОСТИ:\n\n" + '\n\n'.join(final_articles)
             else:
                 logger.warning(f"NewsAPI: No articles found for any query")
@@ -1397,6 +1457,20 @@ class GeminiBot:
         combined_result = '\n\n'.join(results) if results else ""
         logger.info(f"Current data search completed: {len(results)} sources found")
         return combined_result
+
+    def is_politics_query(self, query: str) -> bool:
+        """Определяет, является ли запрос политическим"""
+        politics_keywords = [
+            'политик', 'политич', 'правител', 'президент', 'министр', 'госдума', 
+            'государств', 'власт', 'выборы', 'партия', 'депутат', 'федерац',
+            'кремль', 'путин', 'россия политика', 'внутренняя политика', 'внешняя политика',
+            'законопроект', 'закон', 'референдум', 'митинг', 'протест', 'оппозиция',
+            'парламент', 'совет федерации', 'государственная дума', 'правительство',
+            'мэр', 'губернатор', 'администрация', 'санкции', 'дипломатия'
+        ]
+        
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in politics_keywords)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
