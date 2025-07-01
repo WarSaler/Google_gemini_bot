@@ -712,6 +712,7 @@ class GeminiBot:
 
     async def search_duckduckgo(self, query: str) -> Optional[str]:
         """Поиск через DuckDuckGo Instant Answer API"""
+        logger.info(f"Starting DuckDuckGo search for: {query[:50]}...")
         try:
             url = "https://api.duckduckgo.com/"
             params = {
@@ -722,27 +723,35 @@ class GeminiBot:
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
+                async with session.get(url, params=params, timeout=10) as response:
+                    logger.info(f"DuckDuckGo API response status: {response.status}")
                     if response.status == 200:
                         data = await response.json()
+                        logger.debug(f"DuckDuckGo response keys: {list(data.keys())}")
                         
                         # Извлекаем полезную информацию
                         result = []
                         
                         if data.get('Abstract'):
                             result.append(f"Краткое описание: {data['Abstract']}")
+                            logger.info(f"DuckDuckGo: Found Abstract")
                         
                         if data.get('Definition'):
                             result.append(f"Определение: {data['Definition']}")
+                            logger.info(f"DuckDuckGo: Found Definition")
                         
                         # Связанные темы
                         if data.get('RelatedTopics'):
                             topics = [topic.get('Text', '') for topic in data['RelatedTopics'][:3] if topic.get('Text')]
                             if topics:
                                 result.append(f"Связанные темы: {'; '.join(topics)}")
+                                logger.info(f"DuckDuckGo: Found {len(topics)} related topics")
                         
-                        logger.info(f"DuckDuckGo search result: {len(result)} items found")
+                        logger.info(f"DuckDuckGo search completed: {len(result)} items found")
                         return '\n'.join(result) if result else None
+                    else:
+                        logger.error(f"DuckDuckGo API error: HTTP {response.status}")
+                        return None
                         
         except Exception as e:
             logger.error(f"DuckDuckGo search error: {e}")
@@ -750,28 +759,38 @@ class GeminiBot:
     
     async def search_wikipedia(self, query: str) -> Optional[str]:
         """Поиск в Wikipedia"""
+        logger.info(f"Starting Wikipedia search for: {query[:50]}...")
         try:
             # Поиск на русском языке
             wikipedia.set_lang("ru")
+            logger.info("Wikipedia: Searching in Russian")
             
             # Поиск страницы
             search_results = wikipedia.search(query, results=3)
+            logger.info(f"Wikipedia RU search results: {len(search_results)} found: {search_results}")
+            
             if not search_results:
                 # Если на русском ничего не найдено, пробуем английский
+                logger.info("Wikipedia: No Russian results, trying English")
                 wikipedia.set_lang("en")
                 search_results = wikipedia.search(query, results=3)
+                logger.info(f"Wikipedia EN search results: {len(search_results)} found: {search_results}")
             
             if search_results:
                 try:
                     # Возвращаем краткое описание (первые 3 предложения)
+                    logger.info(f"Wikipedia: Getting summary for '{search_results[0]}'")
                     summary = wikipedia.summary(search_results[0], sentences=3)
-                    logger.info(f"Wikipedia search result: {len(summary)} characters")
+                    logger.info(f"Wikipedia search completed: {len(summary)} characters")
                     return f"Wikipedia: {summary}"
                 except wikipedia.exceptions.DisambiguationError as e:
                     # Если неоднозначность, берем первый вариант
+                    logger.info(f"Wikipedia: Disambiguation error, using '{e.options[0]}'")
                     summary = wikipedia.summary(e.options[0], sentences=3)
                     logger.info(f"Wikipedia disambiguation resolved: {len(summary)} characters")
                     return f"Wikipedia: {summary}"
+            else:
+                logger.warning(f"Wikipedia: No results found for query '{query}'")
                     
         except Exception as e:
             logger.error(f"Wikipedia search error: {e}")
@@ -780,26 +799,35 @@ class GeminiBot:
     
     async def search_news(self, query: str) -> Optional[str]:
         """Поиск актуальных новостей через NewsAPI"""
+        logger.info(f"Starting News search for: {query[:50]}...")
+        
         if not self.news_client:
             logger.warning("NewsAPI client not initialized - missing API key")
             return None
             
         try:
             # Поиск новостей за последние 7 дней
+            from_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            logger.info(f"NewsAPI: Searching from {from_date} with query '{query}'")
+            
             news = self.news_client.get_everything(
                 q=query,
                 language='ru',
                 sort_by='publishedAt',
                 page_size=3,
-                from_param=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                from_param=from_date
             )
+            
+            logger.info(f"NewsAPI response: {news.get('totalResults', 0)} total results")
             
             if news['articles']:
                 articles = []
-                for article in news['articles'][:3]:
+                for i, article in enumerate(news['articles'][:3]):
                     title = article.get('title', '')
                     description = article.get('description', '')
                     published = article.get('publishedAt', '')
+                    
+                    logger.info(f"NewsAPI article {i+1}: title='{title[:50]}...', published={published}")
                     
                     if title:
                         article_text = f"{title}"
@@ -810,11 +838,14 @@ class GeminiBot:
                             article_text += f" ({date})"
                         articles.append(article_text)
                 
-                logger.info(f"News search result: {len(articles)} articles found")
+                logger.info(f"NewsAPI search completed: {len(articles)} articles processed")
                 return f"Актуальные новости:\n" + '\n'.join(articles)
+            else:
+                logger.warning(f"NewsAPI: No articles found for query '{query}'")
                 
         except Exception as e:
-            logger.error(f"News search error: {e}")
+            logger.error(f"NewsAPI search error: {e}")
+            logger.error(f"NewsAPI error type: {type(e).__name__}")
             
         return None
     
@@ -825,6 +856,11 @@ class GeminiBot:
             'сегодня', 'вчера', 'сейчас', 'текущий', 'актуальн', 'последн',
             'новости', 'события', 'происходит', 'случилось', 'недавно',
             
+            # Вопросы о времени и дате
+            'какой год', 'какой месяц', 'какое число', 'какой день', 'какое сегодня', 
+            'какой сейчас', 'какая дата', 'какое время', 'который час',
+            'время', 'дата', 'число', 'день', 'месяц', 'год',
+            
             # Изменяющиеся данные
             'курс', 'цена', 'стоимость', 'погода', 'температура',
             'котировки', 'валют', 'биткоин', 'криптовалют', 'доллар', 'евро',
@@ -834,12 +870,30 @@ class GeminiBot:
             'что нового', 'обновления', 'изменения',
             
             # Английские аналоги
-            'today', 'now', 'current', 'latest', 'recent', 'news', 'update'
+            'today', 'now', 'current', 'latest', 'recent', 'news', 'update',
+            'what date', 'what time', 'what day', 'what month', 'what year'
         ]
         
         query_lower = query.lower()
         result = any(keyword in query_lower for keyword in current_keywords)
         logger.info(f"Current data needed for query '{query[:50]}...': {result}")
+        
+        # Дополнительная проверка для вопросов о времени/дате
+        time_patterns = [
+            r'какой\s+(сейчас|теперь|нынче)',
+            r'какое\s+(сегодня|сейчас|число)',
+            r'что\s+за\s+(день|дата|время)',
+            r'сколько\s+(сейчас|времени)',
+            r'который\s+час'
+        ]
+        
+        import re
+        for pattern in time_patterns:
+            if re.search(pattern, query_lower):
+                result = True
+                logger.info(f"Date/time pattern matched: {pattern}")
+                break
+        
         return result
     
     async def get_current_data(self, query: str) -> str:
@@ -847,6 +901,22 @@ class GeminiBot:
         results = []
         
         logger.info(f"Starting current data search for: {query[:50]}...")
+        
+        # Добавляем текущую дату и время для всех запросов
+        from datetime import datetime
+        import pytz
+        
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        now = datetime.now(moscow_tz)
+        
+        current_time_info = f"""⏰ ТЕКУЩАЯ ДАТА И ВРЕМЯ:
+• Дата: {now.strftime('%d.%m.%Y')} ({now.strftime('%A').replace('Monday', 'Понедельник').replace('Tuesday', 'Вторник').replace('Wednesday', 'Среда').replace('Thursday', 'Четверг').replace('Friday', 'Пятница').replace('Saturday', 'Суббота').replace('Sunday', 'Воскресенье')})
+• Время: {now.strftime('%H:%M:%S')} (МСК)
+• Год: {now.year}
+• Месяц: {now.strftime('%B').replace('January', 'Январь').replace('February', 'Февраль').replace('March', 'Март').replace('April', 'Апрель').replace('May', 'Май').replace('June', 'Июнь').replace('July', 'Июль').replace('August', 'Август').replace('September', 'Сентябрь').replace('October', 'Октябрь').replace('November', 'Ноябрь').replace('December', 'Декабрь')}
+• День: {now.day}"""
+        
+        results.append(current_time_info)
         
         # Поиск в DuckDuckGo
         ddg_result = await self.search_duckduckgo(query)
