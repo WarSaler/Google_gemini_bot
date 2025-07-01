@@ -860,96 +860,286 @@ class GeminiBot:
         # Функция оставлена для совместимости, но не используется
         return False
 
-    async def search_duckduckgo(self, query: str) -> Optional[str]:
-        """Альтернативный поиск - используем простой HTTP запрос для получения актуальной информации"""
-        logger.info(f"Starting alternative web search for: {query[:50]}...")
+    async def search_currency_rates(self, query: str) -> Optional[str]:
+        """Специальный поиск курсов валют через финансовые API"""
+        logger.info(f"Starting currency rates search for: {query[:50]}...")
+        
         try:
-            # Используем альтернативный подход - поиск через обычный HTTP запрос
-            search_url = "https://html.duckduckgo.com/html/"
-            params = {
-                'q': query + " site:ru.wikipedia.org OR site:news.ru OR site:lenta.ru",
-                'kl': 'ru-ru'
-            }
+            # Определяем валютную пару из запроса
+            currency_pairs = []
+            query_lower = query.lower()
             
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+            if any(word in query_lower for word in ['доллар', 'usd', 'dollar']):
+                currency_pairs.append(('USD', 'RUB', 'доллар США'))
+            if any(word in query_lower for word in ['евро', 'eur', 'euro']):
+                currency_pairs.append(('EUR', 'RUB', 'евро'))
+            if any(word in query_lower for word in ['биткоин', 'bitcoin', 'btc']):
+                currency_pairs.append(('BTC', 'USD', 'биткоин'))
+            if any(word in query_lower for word in ['юань', 'yuan', 'cny']):
+                currency_pairs.append(('CNY', 'RUB', 'китайский юань'))
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(search_url, params=params, headers=headers, timeout=10) as response:
-                    logger.info(f"Alternative search response status: {response.status}")
+            # Если валютная пара не определена, используем USD/RUB по умолчанию
+            if not currency_pairs:
+                currency_pairs.append(('USD', 'RUB', 'доллар США'))
+            
+            currency_info = []
+            
+            for from_currency, to_currency, currency_name in currency_pairs:
+                try:
+                    # Используем бесплатный API exchangerate-api.com
+                    url = f"https://api.exchangerate-api.com/v4/latest/{from_currency}"
                     
-                    # HTTP 202 означает "Accepted" - запрос принят, ждем обработки
-                    if response.status == 202:
-                        logger.info("Alternative search: Request accepted (202), retrying...")
-                        await asyncio.sleep(1)  # Ждем 1 секунду
-                        
-                        # Повторная попытка
-                        async with session.get(search_url, params=params, headers=headers, timeout=10) as retry_response:
-                            if retry_response.status == 200:
-                                response = retry_response
-                                logger.info("Alternative search: Retry successful")
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, timeout=10) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                
+                                if to_currency in data.get('rates', {}):
+                                    rate = data['rates'][to_currency]
+                                    date = data.get('date', '')
+                                    
+                                    currency_info.append(
+                                        f"💱 {currency_name}: {rate:.2f} {to_currency} за 1 {from_currency}"
+                                    )
+                                    
+                                    if date:
+                                        currency_info.append(f"📅 Дата обновления: {date}")
+                                    
+                                    logger.info(f"Currency rate found: {from_currency}/{to_currency} = {rate}")
+                                else:
+                                    logger.warning(f"Currency {to_currency} not found in rates")
                             else:
-                                logger.warning(f"Alternative search: Retry failed with {retry_response.status}")
-                                return None
-                    
-                    if response.status == 200:
-                        html_content = await response.text()
+                                logger.error(f"Currency API error: HTTP {response.status}")
                         
-                        # Простое извлечение заголовков результатов
-                        import re
-                        titles = re.findall(r'<a[^>]*class="result__a"[^>]*>([^<]+)</a>', html_content)
-                        
-                        if titles:
-                            # Берем первые 3 результата
-                            search_results = titles[:3]
-                            logger.info(f"Alternative search: Found {len(search_results)} results")
-                            return f"Результаты поиска: {'; '.join(search_results)}"
-                        else:
-                            logger.warning("Alternative search: No results found")
-                            return None
-                    else:
-                        logger.error(f"Alternative search error: HTTP {response.status}")
-                        return None
+                except Exception as e:
+                    logger.error(f"Currency API error for {from_currency}/{to_currency}: {e}")
+                    continue
+            
+            if currency_info:
+                from datetime import datetime
+                import pytz
+                moscow_tz = pytz.timezone('Europe/Moscow')
+                now = datetime.now(moscow_tz)
+                
+                result = f"💰 АКТУАЛЬНЫЕ КУРСЫ ВАЛЮТ (обновлено {now.strftime('%d.%m.%Y %H:%M')} МСК):\n\n"
+                result += "\n".join(currency_info)
+                
+                logger.info(f"Currency search completed: {len(currency_info)} rates found")
+                return result
+            else:
+                logger.warning("No currency rates found")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Currency search error: {e}")
+            return None
+
+    def is_currency_query(self, query: str) -> bool:
+        """Определяет, является ли запрос вопросом о курсе валют"""
+        currency_keywords = [
+            'курс', 'валют', 'доллар', 'евро', 'рубл', 'биткоин', 'юань',
+            'usd', 'eur', 'rub', 'btc', 'cny', 'exchange', 'rate',
+            'стоимость доллара', 'стоимость евро', 'цена биткоина',
+            'обменный курс', 'валютный курс'
+        ]
+        
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in currency_keywords)
+
+    async def search_duckduckgo(self, query: str) -> Optional[str]:
+        """Улучшенный поиск в DuckDuckGo с обходом блокировок"""
+        logger.info(f"Starting alternative web search for: {query[:50]}...")
+        
+        # Если это запрос о валютах, используем специальный поиск
+        if self.is_currency_query(query):
+            logger.info("Currency query detected, using specialized currency search")
+            return await self.search_currency_rates(query)
+        
+        try:
+            # Несколько разных подходов к поиску
+            search_approaches = [
+                {
+                    'url': 'https://html.duckduckgo.com/html/',
+                    'params': {'q': query, 'kl': 'ru-ru'},
+                    'headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                },
+                {
+                    'url': 'https://duckduckgo.com/lite/',
+                    'params': {'q': query, 'kl': 'ru-ru'},
+                    'headers': {
+                        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                }
+            ]
+            
+            for approach in search_approaches:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            approach['url'], 
+                            params=approach['params'], 
+                            headers=approach['headers'], 
+                            timeout=15
+                        ) as response:
+                            
+                            logger.info(f"Alternative search response status: {response.status}")
+                            
+                            if response.status == 202:
+                                logger.info("Alternative search: Request accepted (202), retrying...")
+                                await asyncio.sleep(2)  # Увеличиваем ожидание
+                                
+                                # Повторная попытка с другими заголовками
+                                retry_headers = approach['headers'].copy()
+                                retry_headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                                
+                                async with session.get(
+                                    approach['url'], 
+                                    params=approach['params'], 
+                                    headers=retry_headers, 
+                                    timeout=15
+                                ) as retry_response:
+                                    if retry_response.status == 200:
+                                        response = retry_response
+                                        logger.info("Alternative search: Retry successful")
+                                    else:
+                                        logger.warning(f"Alternative search: Retry failed with {retry_response.status}")
+                                        continue
+                            
+                            if response.status == 200:
+                                html_content = await response.text()
+                                
+                                # Улучшенное извлечение результатов
+                                import re
+                                
+                                # Пробуем разные паттерны для извлечения результатов
+                                patterns = [
+                                    r'<a[^>]*class="result__a"[^>]*>([^<]+)</a>',
+                                    r'<h3[^>]*><a[^>]*>([^<]+)</a></h3>',
+                                    r'<a[^>]*href="[^"]*"[^>]*>([^<]+)</a>[^<]*<span[^>]*class="result__snippet"[^>]*>([^<]+)</span>',
+                                    r'<div[^>]*class="links_main"[^>]*>.*?<a[^>]*>([^<]+)</a>'
+                                ]
+                                
+                                results = []
+                                for pattern in patterns:
+                                    matches = re.findall(pattern, html_content)
+                                    if matches:
+                                        results.extend(matches[:3])
+                                        break
+                                
+                                if results:
+                                    # Фильтруем результаты
+                                    filtered_results = []
+                                    for result in results[:3]:
+                                        if isinstance(result, tuple):
+                                            result = result[0]
+                                        result = result.strip()
+                                        if result and len(result) > 10:
+                                            filtered_results.append(result)
+                                    
+                                    if filtered_results:
+                                        logger.info(f"Alternative search: Found {len(filtered_results)} results")
+                                        return f"🔍 Результаты поиска: {'; '.join(filtered_results)}"
+                                
+                                logger.warning("Alternative search: No useful results found")
+                                continue
+                            else:
+                                logger.error(f"Alternative search error: HTTP {response.status}")
+                                continue
+                                
+                except Exception as search_error:
+                    logger.error(f"Search approach failed: {search_error}")
+                    continue
+            
+            logger.warning("All search approaches failed")
+            return None
                         
         except Exception as e:
             logger.error(f"Alternative search error: {e}")
             return None
-    
+
     async def search_wikipedia(self, query: str) -> Optional[str]:
-        """Поиск в Wikipedia"""
+        """Улучшенный поиск в Wikipedia с учетом типа запроса"""
         logger.info(f"Starting Wikipedia search for: {query[:50]}...")
+        
+        # Если это валютный запрос, пропускаем Wikipedia
+        if self.is_currency_query(query):
+            logger.info("Currency query detected, skipping Wikipedia search")
+            return None
+            
         try:
+            # Улучшаем поисковый запрос в зависимости от типа
+            search_terms = []
+            
+            # Для общих вопросов о времени/дате
+            if any(word in query.lower() for word in ['какой день', 'какое число', 'какой год', 'время']):
+                search_terms = ['календарь', 'текущая дата', 'время']
+            # Для новостей
+            elif any(word in query.lower() for word in ['новости', 'события', 'происходит']):
+                search_terms = ['новости', 'события', 'россия сегодня']
+            # Для остальных запросов используем оригинальный запрос
+            else:
+                search_terms = [query]
+            
             # Поиск на русском языке
             wikipedia.set_lang("ru")
             logger.info("Wikipedia: Searching in Russian")
             
-            # Поиск страницы
-            search_results = wikipedia.search(query, results=3)
-            logger.info(f"Wikipedia RU search results: {len(search_results)} found: {search_results}")
+            for search_term in search_terms:
+                search_results = wikipedia.search(search_term, results=5)
+                logger.info(f"Wikipedia RU search for '{search_term}': {len(search_results)} found: {search_results}")
+                
+                if search_results:
+                    # Фильтруем результаты, исключая персональные страницы
+                    filtered_results = []
+                    for result in search_results:
+                        # Пропускаем персональные страницы
+                        if not any(word in result.lower() for word in [', ', 'владислав', 'михаил', 'александрович', 'борисович']):
+                            filtered_results.append(result)
+                    
+                    if filtered_results:
+                        try:
+                            # Возвращаем краткое описание (первые 3 предложения)
+                            logger.info(f"Wikipedia: Getting summary for '{filtered_results[0]}'")
+                            summary = wikipedia.summary(filtered_results[0], sentences=3)
+                            logger.info(f"Wikipedia search completed: {len(summary)} characters")
+                            return f"📚 Wikipedia: {summary}"
+                        except wikipedia.exceptions.DisambiguationError as e:
+                            # Если неоднозначность, берем первый вариант
+                            if e.options:
+                                logger.info(f"Wikipedia: Disambiguation error, using '{e.options[0]}'")
+                                summary = wikipedia.summary(e.options[0], sentences=3)
+                                logger.info(f"Wikipedia disambiguation resolved: {len(summary)} characters")
+                                return f"📚 Wikipedia: {summary}"
+                        except Exception as summary_error:
+                            logger.error(f"Wikipedia summary error: {summary_error}")
+                            continue
             
-            if not search_results:
-                # Если на русском ничего не найдено, пробуем английский
-                logger.info("Wikipedia: No Russian results, trying English")
-                wikipedia.set_lang("en")
-                search_results = wikipedia.search(query, results=3)
-                logger.info(f"Wikipedia EN search results: {len(search_results)} found: {search_results}")
+            # Если на русском ничего подходящего не найдено, пробуем английский
+            logger.info("Wikipedia: No relevant Russian results, trying English")
+            wikipedia.set_lang("en")
             
-            if search_results:
-                try:
-                    # Возвращаем краткое описание (первые 3 предложения)
-                    logger.info(f"Wikipedia: Getting summary for '{search_results[0]}'")
-                    summary = wikipedia.summary(search_results[0], sentences=3)
-                    logger.info(f"Wikipedia search completed: {len(summary)} characters")
-                    return f"Wikipedia: {summary}"
-                except wikipedia.exceptions.DisambiguationError as e:
-                    # Если неоднозначность, берем первый вариант
-                    logger.info(f"Wikipedia: Disambiguation error, using '{e.options[0]}'")
-                    summary = wikipedia.summary(e.options[0], sentences=3)
-                    logger.info(f"Wikipedia disambiguation resolved: {len(summary)} characters")
-                    return f"Wikipedia: {summary}"
-            else:
-                logger.warning(f"Wikipedia: No results found for query '{query}'")
+            for search_term in search_terms:
+                search_results = wikipedia.search(search_term, results=3)
+                logger.info(f"Wikipedia EN search for '{search_term}': {len(search_results)} found: {search_results}")
+                
+                if search_results:
+                    try:
+                        summary = wikipedia.summary(search_results[0], sentences=2)
+                        logger.info(f"Wikipedia EN search completed: {len(summary)} characters")
+                        return f"📚 Wikipedia (EN): {summary}"
+                    except Exception as en_error:
+                        logger.error(f"Wikipedia EN error: {en_error}")
+                        continue
+            
+            logger.warning(f"Wikipedia: No relevant results found for any search term")
                     
         except Exception as e:
             logger.error(f"Wikipedia search error: {e}")
@@ -957,7 +1147,7 @@ class GeminiBot:
         return None
     
     async def search_news(self, query: str) -> Optional[str]:
-        """Поиск актуальных новостей через NewsAPI"""
+        """Улучшенный поиск актуальных новостей через NewsAPI"""
         logger.info(f"Starting News search for: {query[:50]}...")
         
         if not self.news_client:
@@ -965,11 +1155,21 @@ class GeminiBot:
             return None
             
         try:
-            # Расширенная логика поиска для разных типов запросов
+            # Интеллектуальная логика поиска для разных типов запросов
             search_queries = []
             
+            # Для валютных запросов
+            if self.is_currency_query(query):
+                search_queries = [
+                    'курс доллара',
+                    'курс евро',
+                    'валютный рынок',
+                    'курс рубля',
+                    'экономика валюта'
+                ]
+                logger.info("Currency news search queries prepared")
             # Для общих запросов о новостях
-            if any(word in query.lower() for word in ['новости', 'последние', 'актуальные', 'сегодня', 'происходит']):
+            elif any(word in query.lower() for word in ['новости', 'последние', 'актуальные', 'сегодня', 'происходит']):
                 search_queries = [
                     'россия',
                     'мир',
@@ -977,22 +1177,29 @@ class GeminiBot:
                     'политика',
                     'технологии'
                 ]
+            # Для экономических запросов
+            elif any(word in query.lower() for word in ['экономика', 'рынок', 'финансы', 'бизнес']):
+                search_queries = [
+                    'экономика россия',
+                    'финансовые рынки',
+                    'бизнес новости'
+                ]
             else:
                 # Для специфических запросов
                 search_queries = [query]
             
             all_articles = []
             
-            for search_query in search_queries[:2]:  # Ограничиваем до 2 запросов
+            for search_query in search_queries[:3]:  # Увеличиваем до 3 запросов для валют
                 try:
-                    from_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+                    from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
                     logger.info(f"NewsAPI: Searching '{search_query}' from {from_date}")
                     
                     news = self.news_client.get_everything(
                         q=search_query,
                         language='ru',
                         sort_by='publishedAt',
-                        page_size=2,
+                        page_size=3,  # Увеличиваем количество статей
                         from_param=from_date
                     )
                     
@@ -1003,14 +1210,17 @@ class GeminiBot:
                             title = article.get('title', '')
                             description = article.get('description', '')
                             published = article.get('publishedAt', '')
+                            source = article.get('source', {}).get('name', '')
                             
                             if title and title not in [a.split(':')[0] for a in all_articles]:
-                                article_text = f"{title}"
-                                if description and len(description) < 200:
+                                article_text = f"📰 {title}"
+                                if description and len(description) < 150:
                                     article_text += f": {description}"
                                 if published:
                                     date = published.split('T')[0]
                                     article_text += f" ({date})"
+                                if source:
+                                    article_text += f" - {source}"
                                 all_articles.append(article_text)
                                 
                 except Exception as search_error:
@@ -1018,10 +1228,14 @@ class GeminiBot:
                     continue
             
             if all_articles:
-                # Ограничиваем до 5 самых актуальных новостей
-                final_articles = all_articles[:5]
+                # Ограничиваем до 4 самых актуальных новостей
+                final_articles = all_articles[:4]
                 logger.info(f"NewsAPI search completed: {len(final_articles)} articles found")
-                return f"📰 АКТУАЛЬНЫЕ НОВОСТИ:\n" + '\n\n'.join(final_articles)
+                
+                if self.is_currency_query(query):
+                    return f"💰 ФИНАНСОВЫЕ НОВОСТИ:\n\n" + '\n\n'.join(final_articles)
+                else:
+                    return f"📰 АКТУАЛЬНЫЕ НОВОСТИ:\n\n" + '\n\n'.join(final_articles)
             else:
                 logger.warning(f"NewsAPI: No articles found for any query")
                 
@@ -1043,9 +1257,15 @@ class GeminiBot:
             'какой сейчас', 'какая дата', 'какое время', 'который час',
             'время', 'дата', 'число', 'день', 'месяц', 'год',
             
-            # Изменяющиеся данные
-            'курс', 'цена', 'стоимость', 'погода', 'температура',
-            'котировки', 'валют', 'биткоин', 'криптовалют', 'доллар', 'евро',
+            # Валютные и финансовые данные (расширенный список)
+            'курс', 'цена', 'стоимость', 'валют', 'рубл', 'доллар', 'евро', 'юань',
+            'биткоин', 'криптовалют', 'котировки', 'обменный курс', 'валютный курс',
+            'курс доллара', 'курс евро', 'курс рубля', 'usd', 'eur', 'rub', 'btc', 'cny',
+            'стоимость доллара', 'стоимость евро', 'цена биткоина',
+            'финансы', 'экономика', 'рынок', 'торги', 'биржа',
+            
+            # Погода и изменяющиеся данные
+            'погода', 'температура',
             
             # Свежая информация
             '2024', '2025', 'этот год', 'этот месяц', 'на данный момент',
@@ -1053,7 +1273,8 @@ class GeminiBot:
             
             # Английские аналоги
             'today', 'now', 'current', 'latest', 'recent', 'news', 'update',
-            'what date', 'what time', 'what day', 'what month', 'what year'
+            'what date', 'what time', 'what day', 'what month', 'what year',
+            'exchange rate', 'currency', 'dollar', 'euro', 'ruble', 'bitcoin'
         ]
         
         query_lower = query.lower()
@@ -1071,12 +1292,27 @@ class GeminiBot:
             r'(новости|последние)'
         ]
         
+        # Дополнительная проверка для валютных запросов
+        currency_patterns = [
+            r'курс\s+(доллара|евро|рубля|юаня|биткоина)',
+            r'(доллар|евро|рубль)\s+к\s+(рублю|доллару)',
+            r'стоимость\s+(доллара|евро|биткоина)',
+            r'цена\s+(биткоина|доллара|евро)',
+            r'обменный\s+курс',
+            r'валютный\s+курс'
+        ]
+        
         import re
-        for pattern in time_patterns:
+        for pattern in time_patterns + currency_patterns:
             if re.search(pattern, query_lower):
                 result = True
-                logger.info(f"Date/time pattern matched: {pattern}")
+                logger.info(f"Date/time/currency pattern matched: {pattern}")
                 break
+        
+        # Специальная проверка для валютных запросов
+        if self.is_currency_query(query):
+            result = True
+            logger.info("Currency query detected, current data needed")
         
         logger.info(f"Current data needed for query '{query[:50]}...': {result}")
         return result
