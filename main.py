@@ -271,13 +271,29 @@ class GeminiBot:
                     logger.debug(f"Gemini API responded with status: {response.status}")
                     if response.status == 200:
                         data = await response.json()
+                        logger.debug(f"Gemini API response structure: {list(data.keys())}")
+                        
                         if 'candidates' in data and len(data['candidates']) > 0:
-                            result = data['candidates'][0]['content']['parts'][0]['text']
-                            logger.info(f"Gemini API success: received {len(result)} characters")
-                            return result
+                            candidate = data['candidates'][0]
+                            
+                            # Безопасная проверка структуры ответа
+                            if 'content' in candidate:
+                                content = candidate['content']
+                                if 'parts' in content and len(content['parts']) > 0:
+                                    part = content['parts'][0]
+                                    if 'text' in part:
+                                        result = part['text']
+                                        logger.info(f"Gemini API success: received {len(result)} characters")
+                                        return result
+                                    else:
+                                        logger.error(f"Gemini API: No 'text' in parts. Part structure: {list(part.keys())}")
+                                else:
+                                    logger.error(f"Gemini API: No 'parts' in content. Content structure: {list(content.keys())}")
+                            else:
+                                logger.error(f"Gemini API: No 'content' in candidate. Candidate structure: {list(candidate.keys())}")
                         else:
                             logger.error(f"Gemini API: No candidates in response. Full response: {data}")
-                            return None
+                        return None
                     else:
                         error_text = await response.text()
                         logger.error(f"Gemini API Error: {response.status}")
@@ -340,6 +356,9 @@ class GeminiBot:
                 await self.safe_send_message(update, simple_answer, remaining_minute, remaining_day, user_id)
                 return
             
+            # Инициализируем current_info
+            current_info = None
+            
             # Проверяем, нужны ли актуальные данные
             if self.needs_current_data(message_text):
                 await update.message.reply_text("🔍 Ищу актуальную информацию в интернете...")
@@ -376,13 +395,21 @@ class GeminiBot:
                 messages = [{'text': message_text}]
                 logger.info(f"Regular query for user {user_id} (no current data needed)")
 
-            # Добавление контекста из истории (последние 10 сообщений)
+            # Добавление контекста из истории (ограничиваем для избежания переполнения Gemini)
             context_messages = []
-            for session_msg in list(user_sessions[user_id])[-10:]:
+            
+            # Для сложных запросов с актуальными данными ограничиваем контекст
+            max_context_messages = 3 if current_info else 5
+            
+            for session_msg in list(user_sessions[user_id])[-max_context_messages:]:
                 if session_msg['role'] == 'user':
-                    context_messages.insert(0, {'text': f"Пользователь ранее: {session_msg['content']}"})
+                    # Ограничиваем длину предыдущих сообщений
+                    user_content = session_msg['content'][:100] + "..." if len(session_msg['content']) > 100 else session_msg['content']
+                    context_messages.insert(0, {'text': f"Пользователь ранее: {user_content}"})
                 else:
-                    context_messages.insert(0, {'text': f"Ассистент ранее: {session_msg['content']}"})
+                    # Ограничиваем длину предыдущих ответов
+                    bot_content = session_msg['content'][:150] + "..." if len(session_msg['content']) > 150 else session_msg['content']
+                    context_messages.insert(0, {'text': f"Ассистент ранее: {bot_content}"})
             
             # Объединяем контекст с текущим сообщением
             all_messages = context_messages + messages
@@ -760,6 +787,21 @@ class GeminiBot:
             async with aiohttp.ClientSession() as session:
                 async with session.get(search_url, params=params, headers=headers, timeout=10) as response:
                     logger.info(f"Alternative search response status: {response.status}")
+                    
+                    # HTTP 202 означает "Accepted" - запрос принят, ждем обработки
+                    if response.status == 202:
+                        logger.info("Alternative search: Request accepted (202), retrying...")
+                        await asyncio.sleep(1)  # Ждем 1 секунду
+                        
+                        # Повторная попытка
+                        async with session.get(search_url, params=params, headers=headers, timeout=10) as retry_response:
+                            if retry_response.status == 200:
+                                response = retry_response
+                                logger.info("Alternative search: Retry successful")
+                            else:
+                                logger.warning(f"Alternative search: Retry failed with {retry_response.status}")
+                                return None
+                    
                     if response.status == 200:
                         html_content = await response.text()
                         
