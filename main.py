@@ -3,6 +3,8 @@ import logging
 import asyncio
 import base64
 import tempfile
+import re
+import json
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import Dict, List, Optional
@@ -11,6 +13,8 @@ from io import BytesIO
 import speech_recognition as sr
 from pydub import AudioSegment
 from gtts import gTTS
+import wikipedia
+from newsapi import NewsApiClient
 
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -27,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 AI_API_KEY = os.getenv('AI_API_KEY')
+NEWS_API_KEY = os.getenv('NEWS_API_KEY')
 GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 
 # Лимиты запросов (официальные лимиты Google Gemini 2.5 Flash Free Tier)
@@ -41,6 +46,9 @@ voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолча
 class GeminiBot:
     def __init__(self):
         self.bot = None
+        # Инициализация NewsAPI если ключ есть
+        self.news_client = NewsApiClient(api_key=NEWS_API_KEY) if NEWS_API_KEY else None
+        logger.info(f"NewsAPI initialized: {'Yes' if self.news_client else 'No (missing API key)'}")
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /start"""
@@ -52,6 +60,7 @@ class GeminiBot:
 • 🎤➡️🎵 Голосовыми диалогами (отправьте голосовое - получите голосовой ответ!)
 • 🖼️ Анализом изображений (НЕ создаю картинки!)
 • 💻 Работой с кодом
+• 🌐 Актуальной информацией из интернета (новости, Wikipedia, поиск)
 
 Доступные команды:
 /start - Показать это сообщение
@@ -61,6 +70,8 @@ class GeminiBot:
 /voice - Включить/отключить голосовые ответы
 
 🎵 НОВИНКА: Отправьте голосовое сообщение - я отвечу голосом!
+🌐 НОВИНКА: Бот автоматически ищет актуальную информацию в интернете!
+
 ⚠️ ВАЖНО: Я могу только анализировать изображения и рассказать что на них, но НЕ МОГУ создавать или редактировать картинки!
 
 Просто отправьте мне текст, голосовое сообщение или изображение, и я помогу вам!"""
@@ -93,6 +104,12 @@ class GeminiBot:
 • Автоматическое распознавание русского и английского
 • Автоматический выбор языка для ответа
 • Полноценный голосовой диалог с AI
+
+🌐 НОВИНКА - Актуальная информация:
+• Бот автоматически определяет когда нужны свежие данные
+• Ищет информацию в Wikipedia, DuckDuckGo и новостях
+• Работает со словами: "сегодня", "сейчас", "новости", "актуальный", "курс", "цена"
+• Пример: "Какие новости сегодня?" или "Курс доллара сейчас?"
 
 ⚡ Лимиты:
 • 10 запросов в минуту
@@ -146,8 +163,6 @@ class GeminiBot:
 
     def clean_text_for_speech(self, text: str) -> str:
         """Очистка текста от markdown и специальных символов для лучшего озвучивания"""
-        import re
-        
         # Убираем markdown символы
         text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # **жирный** -> жирный
         text = re.sub(r'\*([^*]+)\*', r'\1', text)      # *курсив* -> курсив
@@ -274,7 +289,7 @@ class GeminiBot:
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка текстовых сообщений"""
+        """Улучшенная обработка текстовых сообщений с актуальными данными"""
         user_id = update.effective_user.id
         message_text = update.message.text
         
@@ -290,7 +305,7 @@ class GeminiBot:
 
         # Инициализация сессии пользователя
         if user_id not in user_sessions:
-            user_sessions[user_id] = []
+            user_sessions[user_id] = deque(maxlen=50)
 
         # Добавление сообщения пользователя в историю
         user_sessions[user_id].append({
@@ -299,49 +314,76 @@ class GeminiBot:
             'timestamp': datetime.now()
         })
 
-        # Ограничение количества сообщений в истории
-        if len(user_sessions[user_id]) > 100:  # 50 пар сообщений
-            user_sessions[user_id] = user_sessions[user_id][-100:]
+        # Отправка индикатора печати
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-        # Подготовка сообщений для API
-        messages = []
-        for msg in user_sessions[user_id]:
-            if msg['role'] == 'user':
-                messages.append({'text': msg['content']})
-            elif msg['role'] == 'assistant':
-                messages.append({'text': f"Assistant: {msg['content']}"})
-
-        # Показать индикатор набора
         try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-            logger.info(f"Sent typing indicator for user {user_id}")
-        except Exception as e:
-            logger.warning(f"Could not send typing indicator for user {user_id}: {e}")
+            # Проверяем, нужны ли актуальные данные
+            if self.needs_current_data(message_text):
+                await update.message.reply_text("🔍 Ищу актуальную информацию в интернете...")
+                current_info = await self.get_current_data(message_text)
+                
+                if current_info:
+                    # Формируем расширенный запрос с актуальными данными
+                    enhanced_message = f"""Пользователь спрашивает: {message_text}
 
-        # Вызов API
-        logger.info(f"Calling Gemini API for user {user_id} with {len(messages)} messages")
-        response = await self.call_gemini_api(messages)
-        
-        if response:
-            logger.info(f"Received response from Gemini API for user {user_id}: {len(response)} characters")
-            # Добавление запроса в счетчик
-            self.add_request(user_id)
+Актуальная информация из интернета:
+{current_info}
+
+Пожалуйста, ответь на вопрос пользователя, используя как свои базовые знания, так и предоставленную актуальную информацию. Если актуальная информация противоречит твоим данным, отдавай приоритет свежей информации из интернета. Отвечай на русском языке."""
+                    
+                    # Подготовка сообщений для Gemini API
+                    messages = [{'text': enhanced_message}]
+                    logger.info(f"Enhanced query prepared for user {user_id} with current data")
+                else:
+                    # Если актуальные данные не найдены, используем обычный запрос
+                    messages = [{'text': message_text}]
+                    logger.info(f"No current data found, using regular query for user {user_id}")
+            else:
+                # Обычный запрос без поиска актуальных данных
+                messages = [{'text': message_text}]
+                logger.info(f"Regular query for user {user_id} (no current data needed)")
+
+            # Добавление контекста из истории (последние 10 сообщений)
+            context_messages = []
+            for session_msg in list(user_sessions[user_id])[-10:]:
+                if session_msg['role'] == 'user':
+                    context_messages.insert(0, {'text': f"Пользователь ранее: {session_msg['content']}"})
+                else:
+                    context_messages.insert(0, {'text': f"Ассистент ранее: {session_msg['content']}"})
             
-            # Добавление ответа в историю
-            user_sessions[user_id].append({
-                'role': 'assistant',
-                'content': response,
-                'timestamp': datetime.now()
-            })
+            # Объединяем контекст с текущим сообщением
+            all_messages = context_messages + messages
+
+            # Вызов Gemini API
+            logger.info(f"Calling Gemini API for user {user_id} with {len(all_messages)} messages")
+            response = await self.call_gemini_api(all_messages)
             
-            # Получение оставшихся запросов
-            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-            
-            # Отправка ответа с безопасной обработкой
-            await self.safe_send_message(update, response, remaining_minute, remaining_day, user_id)
-        else:
-            logger.error(f"No response received from Gemini API for user {user_id}")
-            await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
+            if response:
+                logger.info(f"Received response from Gemini API for user {user_id}: {len(response)} characters")
+                
+                # Добавление запроса в счетчик
+                self.add_request(user_id)
+                
+                # Добавление ответа в историю
+                user_sessions[user_id].append({
+                    'role': 'assistant',
+                    'content': response,
+                    'timestamp': datetime.now()
+                })
+                
+                # Получение оставшихся запросов
+                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+                
+                # Отправка ответа
+                await self.safe_send_message(update, response, remaining_minute, remaining_day, user_id)
+            else:
+                logger.error(f"No response received from Gemini API for user {user_id}")
+                await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
+                
+        except Exception as e:
+            logger.error(f"Error in enhanced_handle_message for user {user_id}: {e}")
+            await self.safe_send_message(update, "❌ Произошла ошибка при обработке сообщения.", None, None, user_id)
 
     async def safe_send_message(self, update: Update, response: str, remaining_minute: int = None, remaining_day: int = None, user_id: int = None):
         """Безопасная отправка сообщения с множественными fallback вариантами"""
@@ -667,6 +709,163 @@ class GeminiBot:
         """Проверка наличия markdown в тексте (не используется)"""
         # Функция оставлена для совместимости, но не используется
         return False
+
+    async def search_duckduckgo(self, query: str) -> Optional[str]:
+        """Поиск через DuckDuckGo Instant Answer API"""
+        try:
+            url = "https://api.duckduckgo.com/"
+            params = {
+                'q': query,
+                'format': 'json',
+                'no_html': '1',
+                'skip_disambig': '1'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Извлекаем полезную информацию
+                        result = []
+                        
+                        if data.get('Abstract'):
+                            result.append(f"Краткое описание: {data['Abstract']}")
+                        
+                        if data.get('Definition'):
+                            result.append(f"Определение: {data['Definition']}")
+                        
+                        # Связанные темы
+                        if data.get('RelatedTopics'):
+                            topics = [topic.get('Text', '') for topic in data['RelatedTopics'][:3] if topic.get('Text')]
+                            if topics:
+                                result.append(f"Связанные темы: {'; '.join(topics)}")
+                        
+                        logger.info(f"DuckDuckGo search result: {len(result)} items found")
+                        return '\n'.join(result) if result else None
+                        
+        except Exception as e:
+            logger.error(f"DuckDuckGo search error: {e}")
+            return None
+    
+    async def search_wikipedia(self, query: str) -> Optional[str]:
+        """Поиск в Wikipedia"""
+        try:
+            # Поиск на русском языке
+            wikipedia.set_lang("ru")
+            
+            # Поиск страницы
+            search_results = wikipedia.search(query, results=3)
+            if not search_results:
+                # Если на русском ничего не найдено, пробуем английский
+                wikipedia.set_lang("en")
+                search_results = wikipedia.search(query, results=3)
+            
+            if search_results:
+                try:
+                    # Возвращаем краткое описание (первые 3 предложения)
+                    summary = wikipedia.summary(search_results[0], sentences=3)
+                    logger.info(f"Wikipedia search result: {len(summary)} characters")
+                    return f"Wikipedia: {summary}"
+                except wikipedia.exceptions.DisambiguationError as e:
+                    # Если неоднозначность, берем первый вариант
+                    summary = wikipedia.summary(e.options[0], sentences=3)
+                    logger.info(f"Wikipedia disambiguation resolved: {len(summary)} characters")
+                    return f"Wikipedia: {summary}"
+                    
+        except Exception as e:
+            logger.error(f"Wikipedia search error: {e}")
+            
+        return None
+    
+    async def search_news(self, query: str) -> Optional[str]:
+        """Поиск актуальных новостей через NewsAPI"""
+        if not self.news_client:
+            logger.warning("NewsAPI client not initialized - missing API key")
+            return None
+            
+        try:
+            # Поиск новостей за последние 7 дней
+            news = self.news_client.get_everything(
+                q=query,
+                language='ru',
+                sort_by='publishedAt',
+                page_size=3,
+                from_param=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            )
+            
+            if news['articles']:
+                articles = []
+                for article in news['articles'][:3]:
+                    title = article.get('title', '')
+                    description = article.get('description', '')
+                    published = article.get('publishedAt', '')
+                    
+                    if title:
+                        article_text = f"{title}"
+                        if description:
+                            article_text += f": {description}"
+                        if published:
+                            date = published.split('T')[0]
+                            article_text += f" ({date})"
+                        articles.append(article_text)
+                
+                logger.info(f"News search result: {len(articles)} articles found")
+                return f"Актуальные новости:\n" + '\n'.join(articles)
+                
+        except Exception as e:
+            logger.error(f"News search error: {e}")
+            
+        return None
+    
+    def needs_current_data(self, query: str) -> bool:
+        """Определяет, нужны ли актуальные данные для ответа"""
+        current_keywords = [
+            # Временные индикаторы
+            'сегодня', 'вчера', 'сейчас', 'текущий', 'актуальн', 'последн',
+            'новости', 'события', 'происходит', 'случилось', 'недавно',
+            
+            # Изменяющиеся данные
+            'курс', 'цена', 'стоимость', 'погода', 'температура',
+            'котировки', 'валют', 'биткоин', 'криптовалют', 'доллар', 'евро',
+            
+            # Свежая информация
+            '2024', '2025', 'этот год', 'этот месяц', 'на данный момент',
+            'что нового', 'обновления', 'изменения',
+            
+            # Английские аналоги
+            'today', 'now', 'current', 'latest', 'recent', 'news', 'update'
+        ]
+        
+        query_lower = query.lower()
+        result = any(keyword in query_lower for keyword in current_keywords)
+        logger.info(f"Current data needed for query '{query[:50]}...': {result}")
+        return result
+    
+    async def get_current_data(self, query: str) -> str:
+        """Получает актуальные данные из различных источников"""
+        results = []
+        
+        logger.info(f"Starting current data search for: {query[:50]}...")
+        
+        # Поиск в DuckDuckGo
+        ddg_result = await self.search_duckduckgo(query)
+        if ddg_result:
+            results.append(f"🔍 Поиск: {ddg_result}")
+        
+        # Поиск в Wikipedia
+        wiki_result = await self.search_wikipedia(query)
+        if wiki_result:
+            results.append(f"📚 {wiki_result}")
+        
+        # Поиск новостей (если есть ключ API)
+        news_result = await self.search_news(query)
+        if news_result:
+            results.append(f"📰 {news_result}")
+        
+        combined_result = '\n\n'.join(results) if results else ""
+        logger.info(f"Current data search completed: {len(results)} sources found")
+        return combined_result
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
