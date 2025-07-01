@@ -3,4 +3,5 @@ aiohttp==3.9.1
 python-dotenv==1.0.0
 SpeechRecognition==3.10.0
 pydub==0.25.1
-requests==2.31.0 
+requests==2.31.0
+gTTS==2.5.4 
