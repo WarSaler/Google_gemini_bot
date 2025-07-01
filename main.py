@@ -36,6 +36,7 @@ DAILY_LIMIT = 250  # 250 запросов в день
 # Хранилище данных
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
 request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
+voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
 
 class GeminiBot:
     def __init__(self):
@@ -57,6 +58,7 @@ class GeminiBot:
 /help - Справка по командам  
 /clear - Очистить историю чата
 /limits - Показать лимиты запросов
+/voice - Включить/отключить голосовые ответы
 
 🎵 НОВИНКА: Отправьте голосовое сообщение - я отвечу голосом!
 ⚠️ ВАЖНО: Я могу только анализировать изображения и рассказать что на них, но НЕ МОГУ создавать или редактировать картинки!
@@ -73,6 +75,7 @@ class GeminiBot:
 /help - Показать эту справку
 /clear - Очистить историю переписки (бот забудет предыдущие сообщения)
 /limits - Показать текущие лимиты запросов
+/voice - Включить/отключить голосовые ответы (по умолчанию включены)
 
 🔄 Как пользоваться:
 • Отправьте текстовое сообщение для получения ответа
@@ -118,6 +121,68 @@ class GeminiBot:
 Лимиты обновляются автоматически."""
         
         await update.message.reply_text(limits_message)
+        
+    async def voice_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /voice - управление голосовыми ответами"""
+        user_id = update.effective_user.id
+        
+        # Переключение состояния голосовых ответов
+        voice_settings[user_id] = not voice_settings[user_id]
+        
+        if voice_settings[user_id]:
+            message = """🎵 Голосовые ответы ВКЛЮЧЕНЫ!
+
+Теперь когда вы отправляете голосовое сообщение, я буду отвечать голосом.
+
+Для отключения используйте команду /voice снова."""
+        else:
+            message = """🔇 Голосовые ответы ОТКЛЮЧЕНЫ!
+
+Теперь на голосовые сообщения я буду отвечать только текстом.
+
+Для включения используйте команду /voice снова."""
+        
+        await update.message.reply_text(message)
+
+    def clean_text_for_speech(self, text: str) -> str:
+        """Очистка текста от markdown и специальных символов для лучшего озвучивания"""
+        import re
+        
+        # Убираем markdown символы
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # **жирный** -> жирный
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)      # *курсив* -> курсив
+        text = re.sub(r'__([^_]+)__', r'\1', text)      # __подчеркнутый__ -> подчеркнутый
+        text = re.sub(r'_([^_]+)_', r'\1', text)        # _курсив_ -> курсив
+        text = re.sub(r'`([^`]+)`', r'\1', text)        # `код` -> код
+        text = re.sub(r'```[^`]*```', '', text)         # Удаляем блоки кода полностью
+        
+        # Убираем специальные символы
+        text = re.sub(r'[#•→←↑↓⚡🔥💡📊🎯🔧⚙️]', '', text)  # Убираем эмодзи и символы
+        text = re.sub(r'[-–—]{2,}', ' ', text)          # Длинные тире
+        text = re.sub(r'[|]', ' ', text)                # Вертикальные линии
+        
+        # Заменяем сокращения на полные слова для лучшего произношения
+        replacements = {
+            'API': 'А-П-И',
+            'HTTP': 'Х-Т-Т-П',
+            'URL': 'Ю-Р-Л',
+            'CSS': 'Ц-С-С',
+            'HTML': 'Х-Т-М-Л',
+            'JSON': 'Д-Ж-Е-Й-С-О-Н',
+            'AI': 'А-И',
+            'ML': 'М-Л',
+            'CI/CD': 'Ц-И слэш Ц-Д',
+        }
+        
+        for abbr, replacement in replacements.items():
+            text = re.sub(r'\b' + abbr + r'\b', replacement, text, flags=re.IGNORECASE)
+        
+        # Очистка множественных пробелов и переносов строк
+        text = re.sub(r'\n+', ' ', text)               # Переносы строк -> пробелы
+        text = re.sub(r'\s+', ' ', text)               # Множественные пробелы -> один пробел
+        text = text.strip()                            # Убираем пробелы в начале и конце
+        
+        return text
 
     def clean_old_requests(self, user_id: int):
         """Очистка старых запросов"""
@@ -462,6 +527,11 @@ class GeminiBot:
     async def text_to_speech(self, text: str, language: str = "ru") -> Optional[bytes]:
         """Синтез речи из текста с помощью gTTS"""
         try:
+            # Проверка на минимальную длину текста
+            if not text or len(text.strip()) < 3:
+                logger.warning("Text too short for TTS")
+                return None
+                
             # Ограничение длины текста (gTTS имеет лимиты)
             if len(text) > 1000:
                 text = text[:1000] + "..."
@@ -552,31 +622,39 @@ class GeminiBot:
                 # Получение оставшихся запросов
                 remaining_minute, remaining_day = self.get_remaining_requests(user_id)
                 
-                # Генерация голосового ответа
-                await update.message.reply_text("🎵 Генерирую голосовой ответ...")
-                
-                # Определение языка для TTS (русский если в тексте есть кириллица, иначе английский)
-                tts_language = "ru" if any('\u0400' <= char <= '\u04FF' for char in response) else "en"
-                
-                # Синтез речи
-                voice_bytes = await self.text_to_speech(response, tts_language)
-                
-                if voice_bytes:
-                    try:
-                        # Отправка голосового сообщения
-                        await update.message.reply_voice(
-                            voice=BytesIO(voice_bytes),
-                            caption=f"🎤➡️🎵 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                        )
-                        logger.info(f"Successfully sent voice response to user {user_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to send voice message to user {user_id}: {e}")
+                # Проверка настроек голосовых ответов пользователя
+                if voice_settings[user_id]:
+                    # Генерация голосового ответа
+                    await update.message.reply_text("🎵 Генерирую голосовой ответ...")
+                    
+                    # Очистка текста от markdown символов для лучшего озвучивания
+                    clean_response = self.clean_text_for_speech(response)
+                    
+                    # Определение языка для TTS (русский если в тексте есть кириллица, иначе английский)
+                    tts_language = "ru" if any('\u0400' <= char <= '\u04FF' for char in clean_response) else "en"
+                    
+                    # Синтез речи
+                    voice_bytes = await self.text_to_speech(clean_response, tts_language)
+                    
+                    if voice_bytes:
+                        try:
+                            # Отправка голосового сообщения
+                            await update.message.reply_voice(
+                                voice=BytesIO(voice_bytes),
+                                caption=f"🎤➡️🎵 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня\n\n💡 Отключить голосовые ответы: /voice"
+                            )
+                            logger.info(f"Successfully sent voice response to user {user_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to send voice message to user {user_id}: {e}")
+                            # Fallback к текстовому ответу
+                            await self.safe_send_message(update, f"❌ Не удалось отправить голосовой ответ, вот текст:\n\n{response}", remaining_minute, remaining_day, user_id)
+                    else:
+                        logger.error(f"Voice synthesis failed for user {user_id}")
                         # Fallback к текстовому ответу
-                        await self.safe_send_message(update, f"❌ Не удалось отправить голосовой ответ, вот текст:\n\n{response}", remaining_minute, remaining_day, user_id)
+                        await self.safe_send_message(update, f"❌ Не удалось создать голосовой ответ, вот текст:\n\n{response}", remaining_minute, remaining_day, user_id)
                 else:
-                    logger.error(f"Voice synthesis failed for user {user_id}")
-                    # Fallback к текстовому ответу
-                    await self.safe_send_message(update, f"❌ Не удалось создать голосовой ответ, вот текст:\n\n{response}", remaining_minute, remaining_day, user_id)
+                    # Текстовый ответ если голосовые отключены
+                    await self.safe_send_message(update, f"📝 {response}\n\n💡 Включить голосовые ответы: /voice", remaining_minute, remaining_day, user_id)
             else:
                 logger.error(f"No response received from Gemini API for voice message from user {user_id}")
                 await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
@@ -675,6 +753,7 @@ async def run_bot():
     application.add_handler(CommandHandler("help", bot.help_command))
     application.add_handler(CommandHandler("clear", bot.clear_command))
     application.add_handler(CommandHandler("limits", bot.limits_command))
+    application.add_handler(CommandHandler("voice", bot.voice_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
     application.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
