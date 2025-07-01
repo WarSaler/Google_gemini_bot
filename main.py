@@ -702,11 +702,102 @@ class GeminiBot:
             
             logger.info(f"Voice transcribed for user {user_id}: {transcribed_text[:100]}...")
             
-            # Подготовка сообщения для Gemini API (БЕЗ контекста истории для независимых ответов)
-            messages = [{'text': transcribed_text}]
-
             # Отправка уведомления о том, что речь распознана
-            await update.message.reply_text(f"✅ Распознано: \"{transcribed_text}\"\n\n💭 Думаю над ответом...")
+            await update.message.reply_text(f"✅ Распознано: \"{transcribed_text}\"")
+            
+            # 🚀 ДОБАВЛЯЕМ БЫСТРЫЕ ОТВЕТЫ НА ПРОСТЫЕ ВОПРОСЫ О ВРЕМЕНИ ДЛЯ ГОЛОСОВЫХ СООБЩЕНИЙ
+            simple_time_patterns = [
+                r'(какой|какое)\s+(сейчас|сегодня)\s+(год|число|день|время|дата)',
+                r'который\s+час',
+                r'какое\s+время',
+                r'какая\s+дата'
+            ]
+            
+            import re
+            is_simple_time_query = any(re.search(pattern, transcribed_text.lower()) for pattern in simple_time_patterns)
+            
+            if is_simple_time_query:
+                logger.info(f"Simple time query detected for voice from user {user_id}")
+                simple_answer = self.get_simple_datetime_info()
+                
+                # Добавляем запрос в счетчик
+                self.add_request(user_id)
+                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+                
+                # Проверка настроек голосовых ответов пользователя для быстрого ответа
+                if voice_settings[user_id]:
+                    # Генерация голосового ответа для быстрого ответа
+                    await update.message.reply_text("🎵 Генерирую голосовой ответ...")
+                    
+                    # Очистка текста от markdown символов
+                    clean_response = self.clean_text_for_speech(simple_answer)
+                    
+                    # Синтез речи
+                    voice_bytes = await self.text_to_speech(clean_response, "ru")
+                    
+                    if voice_bytes:
+                        try:
+                            await update.message.reply_voice(
+                                voice=BytesIO(voice_bytes),
+                                caption=f"🎤➡️🎵 Быстрый голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                            )
+                            logger.info(f"Successfully sent quick voice response to user {user_id}")
+                            return
+                        except Exception as e:
+                            logger.error(f"Failed to send quick voice response to user {user_id}: {e}")
+                            # Fallback к текстовому ответу
+                            await self.safe_send_message(update, simple_answer, remaining_minute, remaining_day, user_id)
+                            return
+                    else:
+                        # Fallback к текстовому ответу
+                        await self.safe_send_message(update, simple_answer, remaining_minute, remaining_day, user_id)
+                        return
+                else:
+                    # Текстовый ответ если голосовые отключены
+                    await self.safe_send_message(update, simple_answer, remaining_minute, remaining_day, user_id)
+                    return
+            
+            # 🔥 ДОБАВЛЯЕМ ЛОГИКУ ПОИСКА АКТУАЛЬНОЙ ИНФОРМАЦИИ ДЛЯ ГОЛОСОВЫХ СООБЩЕНИЙ
+            current_info = None
+            
+            # Проверяем, нужны ли актуальные данные для голосового запроса
+            if self.needs_current_data(transcribed_text):
+                await update.message.reply_text("🔍 Ищу актуальную информацию в интернете...")
+                current_info = await self.get_current_data(transcribed_text)
+                
+                if current_info:
+                    # Формируем расширенный запрос с актуальными данными (как в handle_message)
+                    enhanced_message = f"""❗❗❗ КРИТИЧЕСКИ ВАЖНО: ИСПОЛЬЗУЙ ТОЛЬКО АКТУАЛЬНУЮ ИНФОРМАЦИЮ НИЖЕ ❗❗❗
+
+Голосовой вопрос пользователя: {transcribed_text}
+
+🔥 АКТУАЛЬНАЯ ИНФОРМАЦИЯ ИЗ ИНТЕРНЕТА (ОБЯЗАТЕЛЬНО К ИСПОЛЬЗОВАНИЮ):
+{current_info}
+
+📋 ИНСТРУКЦИИ ДЛЯ ОТВЕТА:
+1. ОБЯЗАТЕЛЬНО используй предоставленную актуальную дату и время
+2. ИГНОРИРУЙ свои устаревшие данные о дате/времени
+3. Если вопрос о дате/времени - отвечай ТОЛЬКО на основе актуальной информации выше
+4. Для новостей - используй найденные актуальные новости
+5. Отвечай кратко и по существу на русском языке
+6. НЕ упоминай что у тебя ограниченные данные - просто используй актуальную информацию
+
+❗ ВНИМАНИЕ: Если это вопрос о текущей дате/времени, твой ответ должен быть основан ИСКЛЮЧИТЕЛЬНО на актуальной информации выше!"""
+                    
+                    # Подготовка сообщений для Gemini API с актуальными данными
+                    messages = [{'text': enhanced_message}]
+                    logger.info(f"Enhanced voice query prepared for user {user_id} with current data")
+                else:
+                    # Если актуальные данные не найдены, используем обычный запрос
+                    messages = [{'text': transcribed_text}]
+                    logger.info(f"No current data found for voice, using regular query for user {user_id}")
+            else:
+                # Обычный запрос без поиска актуальных данных
+                messages = [{'text': transcribed_text}]
+                logger.info(f"Regular voice query for user {user_id} (no current data needed)")
+
+            # Уведомление о начале обработки
+            await update.message.reply_text("💭 Думаю над ответом...")
             
             logger.info(f"Calling Gemini API for voice message from user {user_id}")
             response = await self.call_gemini_api(messages)
