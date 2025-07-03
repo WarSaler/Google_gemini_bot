@@ -353,144 +353,152 @@ class GeminiBot:
                 return "🤖 Произошла техническая ошибка. Попробуйте повторить запрос через несколько секунд."
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Улучшенная обработка текстовых сообщений с актуальными данными"""
-        user_id = update.effective_user.id
-        message_text = update.message.text
+        """Обработка текстовых сообщений"""
+        # Начинаем печатать для UX
+        await update.message.chat.action("typing")
         
-        logger.info(f"Received message from user {user_id}: {message_text[:100]}...")
+        # Получаем сообщение пользователя
+        user_message = update.message.text
+        user_id = update.message.from_user.id
         
-        # Проверка лимитов
+        # Логируем сообщение пользователя (обрезаем для предотвращения спама в логах)
+        logger.info(f"Received message from user {user_id}: {user_message[:50]}...")
+        
+        # Проверка, можно ли сделать запрос (ограничения по частоте)
         if not self.can_make_request(user_id):
             remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-            await update.message.reply_text(
-                f"❌ Превышен лимит запросов!\n\nОсталось запросов: {remaining_minute}/{MINUTE_LIMIT} в этой минуте, {remaining_day}/{DAILY_LIMIT} сегодня."
+            await self.safe_send_message(
+                update,
+                "⚠️ Превышен лимит запросов. Пожалуйста, подождите немного перед следующим запросом.",
+                remaining_minute, remaining_day, user_id
             )
             return
-
-        # Инициализация сессии пользователя
-        if user_id not in user_sessions:
-            user_sessions[user_id] = deque(maxlen=50)
-
-        # Добавление сообщения пользователя в историю
-        user_sessions[user_id].append({
-            'role': 'user',
-            'content': message_text,
-            'timestamp': datetime.now()
-        })
-
-        # Отправка индикатора печати
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
+            
+        # Увеличиваем счетчик запросов
+        self.add_request(user_id)
+        
+        # Отправляем "печатает" для лучшего UX
+        await update.message.chat.action("typing")
+        
         try:
-            # Проверяем простые вопросы о времени/дате для быстрого ответа
-            simple_time_patterns = [
-                r'(какой|какое)\s+(сейчас|сегодня)\s+(год|число|день|время|дата)',
-                r'который\s+час',
-                r'какое\s+время',
-                r'какая\s+дата'
-            ]
-            
-            import re
-            is_simple_time_query = any(re.search(pattern, message_text.lower()) for pattern in simple_time_patterns)
-            
-            if is_simple_time_query:
-                logger.info(f"Simple time query detected for user {user_id}")
-                simple_answer = self.get_simple_datetime_info()
-                
-                # Добавляем запрос в счетчик
-                self.add_request(user_id)
-                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-                
-                await self.safe_send_message(update, simple_answer, remaining_minute, remaining_day, user_id)
-                return
-            
-            # Инициализируем current_info
-            current_info = None
-            
             # Проверяем, нужны ли актуальные данные
-            if self.needs_current_data(message_text):
-                await update.message.reply_text("🔍 Ищу актуальную информацию в интернете...")
-                current_info = await self.get_current_data(message_text)
+            needs_current = self.needs_current_data(user_message)
+            logger.info(f"Current data needed for query '{user_message[:50]}...': {needs_current}")
+            
+            # Детектируем запросы новостей (политических и других)
+            is_politics = self.is_politics_query(user_message)
+            has_news_keywords = 'новост' in user_message.lower() or 'news' in user_message.lower()
+            
+            # Для запросов про погоду, используем специальный поиск погоды
+            if self.is_weather_query(user_message):
+                logger.info(f"Weather query detected from user {user_id}")
+                weather_result = await self.search_weather_data(user_message)
+                if weather_result:
+                    await self.safe_send_message(update, weather_result)
+                    return
+            
+            # Для политических новостей или явных запросов новостей, используем поиск новостей
+            if is_politics or has_news_keywords:
+                logger.info(f"News query detected from user {user_id}: politics={is_politics}")
+                news_result = await self.search_news(user_message)
+                if news_result:
+                    await self.safe_send_message(update, news_result)
+                    return
+            
+            # Для запросов валют, используем специальный поиск
+            if self.is_currency_query(user_message):
+                logger.info(f"Currency query detected from user {user_id}")
+                currency_result = await self.search_currency_rates(user_message)
+                if currency_result:
+                    await self.safe_send_message(update, currency_result)
+                    return
+            
+            # Если нужны актуальные данные, получаем их с внешних источников
+            if needs_current:
+                logger.info(f"Getting current data for user {user_id}")
+                result = await self.get_current_data(user_message)
+                if result:
+                    await self.safe_send_message(update, result)
+                    return
                 
-                if current_info:
-                    # Формируем расширенный запрос с актуальными данными
-                    enhanced_message = f"""❗❗❗ КРИТИЧЕСКИ ВАЖНО: ИСПОЛЬЗУЙ ТОЛЬКО АКТУАЛЬНУЮ ИНФОРМАЦИЮ НИЖЕ ❗❗❗
-
-Вопрос пользователя: {message_text}
-
-🔥 АКТУАЛЬНАЯ ИНФОРМАЦИЯ ИЗ ИНТЕРНЕТА (ОБЯЗАТЕЛЬНО К ИСПОЛЬЗОВАНИЮ):
-{current_info}
-
-📋 ИНСТРУКЦИИ ДЛЯ ОТВЕТА:
-1. ОБЯЗАТЕЛЬНО используй предоставленную актуальную дату и время
-2. ИГНОРИРУЙ свои устаревшие данные о дате/времени
-3. Если вопрос о дате/времени - отвечай ТОЛЬКО на основе актуальной информации выше
-4. Для новостей - используй найденные актуальные новости
-5. Отвечай кратко и по существу на русском языке
-6. НЕ упоминай что у тебя ограниченные данные - просто используй актуальную информацию
-
-❗ ВНИМАНИЕ: Если это вопрос о текущей дате/времени, твой ответ должен быть основан ИСКЛЮЧИТЕЛЬНО на актуальной информации выше!"""
-                    
-                    # Подготовка сообщений для Gemini API
-                    messages = [{'text': enhanced_message}]
-                    logger.info(f"Enhanced query prepared for user {user_id} with current data")
-                else:
-                    # Если актуальные данные не найдены, используем обычный запрос
-                    messages = [{'text': message_text}]
-                    logger.info(f"No current data found, using regular query for user {user_id}")
-            else:
-                # Обычный запрос без поиска актуальных данных
-                messages = [{'text': message_text}]
-                logger.info(f"Regular query for user {user_id} (no current data needed)")
-
-            # Добавление контекста из истории (ограничиваем для избежания переполнения Gemini)
-            context_messages = []
+            # Стандартный запрос (Gemini API)
+            logger.info(f"Regular query for user {user_id} (no current data needed)")
             
-            # Для сложных запросов с актуальными данными ограничиваем контекст
-            max_context_messages = 3 if current_info else 5
+            # Получение истории сообщений пользователя
+            if user_id not in user_sessions:
+                user_sessions[user_id] = []
             
-            for session_msg in list(user_sessions[user_id])[-max_context_messages:]:
-                if session_msg['role'] == 'user':
-                    # Ограничиваем длину предыдущих сообщений
-                    user_content = session_msg['content'][:100] + "..." if len(session_msg['content']) > 100 else session_msg['content']
-                    context_messages.insert(0, {'text': f"Пользователь ранее: {user_content}"})
-                else:
-                    # Ограничиваем длину предыдущих ответов
-                    bot_content = session_msg['content'][:150] + "..." if len(session_msg['content']) > 150 else session_msg['content']
-                    context_messages.insert(0, {'text': f"Ассистент ранее: {bot_content}"})
+            # Чистка старых запросов, если нужно
+            self.clean_old_requests(user_id)
             
-            # Объединяем контекст с текущим сообщением
-            all_messages = context_messages + messages
-
-            # Вызов Gemini API
-            logger.info(f"Calling Gemini API for user {user_id} with {len(all_messages)} messages")
-            response = await self.call_gemini_api(all_messages)
+            # Добавляем новое сообщение в историю
+            user_sessions[user_id].append({
+                "role": "user",
+                "parts": [{"text": user_message}],
+                "timestamp": datetime.now()
+            })
             
+            # Собираем сообщения для отправки в API
+            messages = []
+            for message in user_sessions[user_id]:
+                messages.append({
+                    "role": message["role"],
+                    "parts": message["parts"]
+                })
+                
+            logger.info(f"Calling Gemini API for user {user_id} with {len(messages)} messages")
+            
+            # Вызываем Gemini API
+            response = await self.call_gemini_api(messages)
+            
+            # Если ответ получен
             if response:
                 logger.info(f"Received response from Gemini API for user {user_id}: {len(response)} characters")
                 
-                # Добавление запроса в счетчик
-                self.add_request(user_id)
-                
-                # Добавление ответа в историю
+                # Добавляем ответ в историю сообщений
                 user_sessions[user_id].append({
-                    'role': 'assistant',
-                    'content': response,
-                    'timestamp': datetime.now()
+                    "role": "model",
+                    "parts": [{"text": response}],
+                    "timestamp": datetime.now()
                 })
                 
-                # Получение оставшихся запросов
+                # Отправка ответа пользователю с информацией об оставшихся запросах
                 remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-                
-                # Отправка ответа
                 await self.safe_send_message(update, response, remaining_minute, remaining_day, user_id)
             else:
-                logger.error(f"No response received from Gemini API for user {user_id}")
-                await self.safe_send_message(update, "❌ Произошла ошибка при обращении к AI. Попробуйте позже.", None, None, user_id)
+                # Обработка ошибки Gemini API
+                error_message = "⚠️ Извините, возникла проблема при обработке вашего запроса. Попробуйте еще раз или измените запрос."
+                await self.safe_send_message(update, error_message)
                 
         except Exception as e:
-            logger.error(f"Error in enhanced_handle_message for user {user_id}: {e}")
-            await self.safe_send_message(update, "❌ Произошла ошибка при обработке сообщения.", None, None, user_id)
+            logger.error(f"Error in handle_message: {e}")
+            await self.safe_send_message(update, "⚠️ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже.")
+            
+    def is_politics_query(self, query: str) -> bool:
+        """Проверяет, является ли запрос поиском политических новостей"""
+        politics_keywords = [
+            'политика', 'политические', 'политических', 'политические новости',
+            'политика россии', 'политика в мире', 'новости политики', 'последние новости политики',
+            'политическая ситуация', 'политические события', 'политическое', 'политических новостей',
+            'политика сша', 'политика китая', 'политика европы', 'геополитика', 'внешняя политика'
+        ]
+        
+        query_lower = query.lower()
+        
+        # Проверяем наличие ключевых слов
+        has_politics = any(keyword in query_lower for keyword in politics_keywords)
+        has_news = any(word in query_lower for word in ['новости', 'новость', 'последние', 'свежие', 'актуальные', 'сегодняшние'])
+        
+        # Также проверяем более сложные фразы
+        complex_phrases = [
+            'предоставь новости', 'покажи новости', 'расскажи о новостях', 
+            'что происходит', 'что нового', 'что случилось',
+            'новостей политики', 'новостей о политике', 'политических новостей'
+        ]
+        
+        has_complex = any(phrase in query_lower for phrase in complex_phrases)
+        
+        return has_politics or (has_news and 'политик' in query_lower) or has_complex
 
     async def safe_send_message(self, update: Update, response: str, remaining_minute: int = None, remaining_day: int = None, user_id: int = None):
         """Безопасная отправка сообщения с множественными fallback вариантами"""
@@ -1221,9 +1229,18 @@ class GeminiBot:
         
         # Проверяем наличие ключевых слов
         has_politics = any(keyword in query_lower for keyword in politics_keywords)
-        has_news = 'новости' in query_lower or 'новость' in query_lower or 'последние' in query_lower
+        has_news = any(word in query_lower for word in ['новости', 'новость', 'последние', 'свежие', 'актуальные', 'сегодняшние'])
         
-        return has_politics or (has_news and 'политик' in query_lower)
+        # Также проверяем более сложные фразы
+        complex_phrases = [
+            'предоставь новости', 'покажи новости', 'расскажи о новостях', 
+            'что происходит', 'что нового', 'что случилось',
+            'новостей политики', 'новостей о политике', 'политических новостей'
+        ]
+        
+        has_complex = any(phrase in query_lower for phrase in complex_phrases)
+        
+        return has_politics or (has_news and 'политик' in query_lower) or has_complex
 
     def extract_numbers_from_query(self, query: str) -> List[int]:
         """Извлекает числа из запроса для определения количества результатов"""
@@ -1234,6 +1251,35 @@ class GeminiBot:
     async def search_news(self, query: str) -> Optional[str]:
         """Поиск новостей с улучшенной обработкой политических запросов"""
         logger.info(f"Starting news search for: {query[:50]}...")
+        
+        # Проверяем, является ли запрос политическим
+        is_politics = self.is_politics_query(query)
+        query_lower = query.lower()
+        
+        # Извлекаем необходимое количество новостей из запроса
+        max_news = 10  # По умолчанию
+        numbers = self.extract_numbers_from_query(query)
+        if numbers:
+            # Если пользователь указал количество новостей, используем его значение (с ограничением)
+            max_news = min(max(numbers), 50)  # Максимум 50 новостей
+            logger.info(f"User requested {max_news} news articles")
+        
+        # Формируем поисковый запрос в зависимости от типа
+        search_query = "последние новости россия сегодня"
+        if is_politics:
+            search_query = "последние политические новости россия сегодня"
+        elif "украин" in query_lower:
+            search_query = "последние новости украина сегодня"
+        elif "экономик" in query_lower or "финанс" in query_lower or "бизнес" in query_lower:
+            search_query = "последние экономические новости сегодня россия"
+        else:
+            # Если это общий новостной запрос, извлекаем ключевые слова
+            words = query_lower.split()
+            content_words = [w for w in words if len(w) > 3 and w not in ["новости", "последние", "свежие", "актуальные", "сегодня", "предоставь", "покажи", "расскажи"]]
+            if content_words:
+                search_query = f"последние новости {' '.join(content_words[:3])} сегодня"
+        
+        logger.info(f"Generated search query: {search_query}")
         
         # Инициализируем NewsAPI клиент, если есть ключ
         newsapi = None
@@ -1247,33 +1293,14 @@ class GeminiBot:
             logger.warning("NewsAPI not initialized: No API key")
 
         try:
-            # Извлекаем необходимое количество новостей из запроса
-            max_news = 10  # По умолчанию
-            numbers = self.extract_numbers_from_query(query)
-            if numbers:
-                # Если пользователь указал количество новостей, используем его значение (с ограничением)
-                max_news = min(max(numbers), 50)  # Максимум 50 новостей
-            
-            # Проверяем, является ли запрос политическим
-            is_politics = self.is_politics_query(query)
-            
-            # Формируем параметры поиска
-            query_terms = query.lower()
-            language = 'ru'  # По умолчанию русский
-            
             # Поиск через NewsAPI
             news_results = []
             if newsapi:
                 try:
-                    # Формируем поисковый запрос
-                    search_query = query_terms
-                    if is_politics:
-                        search_query = 'политика россия сегодня'
-                    
-                    # Сначала пробуем получить главные новости
+                    # Пробуем получить главные новости
                     top_headlines = newsapi.get_top_headlines(
                         q=search_query,
-                        language=language,
+                        language='ru',
                         country='ru',
                         page_size=min(max_news, 20)  # NewsAPI ограничивает до 20
                     )
@@ -1282,7 +1309,7 @@ class GeminiBot:
                     if top_headlines.get('totalResults', 0) < max_news:
                         everything = newsapi.get_everything(
                             q=search_query,
-                            language=language,
+                            language='ru',
                             sort_by='publishedAt',
                             page_size=max_news
                         )
@@ -1310,7 +1337,7 @@ class GeminiBot:
                             logger.info(f"Retrying NewsAPI with wider query: {wider_query}")
                             everything = newsapi.get_everything(
                                 q=wider_query,
-                                language=language,
+                                language='ru',
                                 sort_by='publishedAt',
                                 page_size=max_news
                             )
@@ -1327,16 +1354,12 @@ class GeminiBot:
             if not news_results:
                 logger.info("Using DuckDuckGo as fallback for news")
                 
-                search_terms = query_terms
-                if is_politics:
-                    search_terms = "последние политические новости россия сегодня"
-                
                 # Поиск через DuckDuckGo
                 try:
                     async with aiohttp.ClientSession() as session:
                         # Создаем URL-safe строку запроса
                         from urllib.parse import quote
-                        safe_search_terms = quote(f"{search_terms} последние новости")
+                        safe_search_terms = quote(search_query)
                         
                         response = await session.get(
                             f"https://html.duckduckgo.com/html/?q={safe_search_terms}", 
@@ -1416,9 +1439,9 @@ class GeminiBot:
                     
                     # Формируем текст новости
                     news_text = f"{i}. *{title}*\n" + \
-                              f"_{source}_\n" + \
-                              f"{description}\n" + \
-                              f"[Подробнее]({url})"
+                            f"_{source}_\n" + \
+                            f"{description}\n" + \
+                            f"[Подробнее]({url})"
                     
                     news_items.append(news_text)
                 
@@ -1904,6 +1927,12 @@ async def run_bot():
         logger.error("Missing required environment variables: TELEGRAM_TOKEN or AI_API_KEY")
         return
     
+    # Проверка доступности NewsAPI ключа
+    if NEWS_API_KEY:
+        logger.info("NewsAPI key is available")
+    else:
+        logger.warning("NewsAPI key is missing - news searches will use fallback methods only")
+    
     # Создание приложения
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     bot = GeminiBot()
@@ -1925,7 +1954,7 @@ async def run_bot():
     await application.start()
     
     # Определяем, в каком окружении мы находимся - Render или локальное
-    is_production = os.environ.get('IS_RENDER') == 'true'
+    is_production = os.environ.get('RENDER') is not None
     
     # Проверяем текущее состояние webhook перед очисткой
     try:
@@ -2043,45 +2072,31 @@ async def run_bot():
     finally:
         await application.stop()
 
-async def start_polling(application):
-    """Запуск получения обновлений через polling с улучшенным механизмом повторных попыток"""
-    max_retries = 5
-    for attempt in range(max_retries):
+async def start_polling(application, max_attempts=5):
+    """Запуск бота в режиме поллинга с повторными попытками"""
+    for attempt in range(max_attempts):
         try:
-            logger.info(f"Starting polling (attempt {attempt + 1}/{max_retries})...")
+            logger.info(f"Starting polling (attempt {attempt+1}/{max_attempts})...")
             
-            # Дополнительная очистка перед каждой попыткой
-            if attempt > 0:
-                logger.info("Additional cleanup before retry...")
-                try:
-                    await application.bot.delete_webhook(drop_pending_updates=True)
-                    await asyncio.sleep(2)
-                except:
-                    pass
+            # Убедимся, что webhook отключен
+            await application.bot.delete_webhook(drop_pending_updates=True)
             
-            await application.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES, 
-                drop_pending_updates=True,
-                timeout=60,
-                pool_timeout=60,
-                connect_timeout=45,
-                read_timeout=45
-            )
+            # Запускаем поллинг
+            await application.updater.start_polling(drop_pending_updates=True)
             logger.info("Polling started successfully")
             break
         except Exception as e:
-            logger.error(f"Polling failed on attempt {attempt + 1}: {e}")
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 20  # Увеличиваем время ожидания
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error("All polling attempts failed - this indicates a serious configuration issue")
-                logger.error("Possible causes:")
-                logger.error("1. Bot token is being used by another instance")
-                logger.error("2. Webhook is set externally")
-                logger.error("3. Network connectivity issues")
-                return
+            logger.error(f"Error starting polling (attempt {attempt+1}/{max_attempts}): {e}")
+            
+            # Если это последняя попытка, выбрасываем исключение дальше
+            if attempt == max_attempts - 1:
+                logger.critical("All polling attempts failed!")
+                raise
+            
+            # Ждем перед повторной попыткой
+            await asyncio.sleep(5)
+    
+    logger.info("Bot is now running and waiting for messages...")
 
 async def main():
     """Основная функция"""
