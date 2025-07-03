@@ -301,6 +301,10 @@ class GeminiBot:
                                         result = content['text']
                                         logger.info(f"Gemini API alternative structure success: received {len(result)} characters")
                                         return result
+                                    
+                                    # Если содержимое пустое, возвращаем ошибку
+                                    logger.error("Gemini API: Empty content structure detected")
+                                    return "🤖 Извините, сервис временно недоступен. Попробуйте повторить запрос через несколько секунд."
                             else:
                                 logger.error(f"Gemini API: No 'content' in candidate. Candidate structure: {list(candidate.keys())}")
                                 logger.error(f"Full candidate: {candidate}")
@@ -312,16 +316,38 @@ class GeminiBot:
                                     return result
                         else:
                             logger.error(f"Gemini API: No candidates in response. Full response: {data}")
-                        return None
+                            # Попытка найти текст в других местах ответа
+                            if 'text' in data:
+                                result = data['text']
+                                logger.info(f"Gemini API direct response text success: received {len(result)} characters")
+                                return result
+                            return "🤖 Извините, сервис ИИ временно недоступен. Попробуйте повторить запрос через несколько секунд."
                     else:
                         error_text = await response.text()
                         logger.error(f"Gemini API Error: {response.status}")
                         logger.error(f"Error details: {error_text}")
-                        return None
+                        
+                        # Возвращаем понятную ошибку пользователю
+                        if response.status == 429:
+                            return "⏰ Слишком много запросов. Подождите немного и попробуйте снова."
+                        elif response.status == 403:
+                            return "🔐 Ошибка доступа к сервису ИИ. Попробуйте позже."
+                        elif response.status >= 500:
+                            return "🔧 Сервис ИИ временно недоступен. Попробуйте через несколько минут."
+                        else:
+                            return "❌ Произошла ошибка при обработке запроса. Попробуйте изменить формулировку."
         except Exception as e:
             logger.error(f"Exception calling Gemini API: {e}")
             logger.error(f"Exception type: {type(e).__name__}")
-            return None
+            
+            # Возвращаем понятную ошибку вместо None
+            import aiohttp
+            if isinstance(e, aiohttp.ClientError):
+                return "🌐 Ошибка сетевого соединения. Проверьте подключение к интернету."
+            elif isinstance(e, asyncio.TimeoutError):
+                return "⏱️ Превышено время ожидания ответа. Попробуйте повторить запрос."
+            else:
+                return "🤖 Произошла техническая ошибка. Попробуйте повторить запрос через несколько секунд."
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Улучшенная обработка текстовых сообщений с актуальными данными"""
@@ -974,6 +1000,14 @@ class GeminiBot:
             logger.info("Currency query detected, using specialized currency search")
             return await self.search_currency_rates(query)
         
+        # Если это запрос о погоде, используем специальный поиск
+        if self.is_weather_query(query):
+            logger.info("Weather query detected, using specialized weather search")
+            weather_result = await self.search_weather_data(query)
+            if weather_result:
+                return weather_result
+            # Если специальный поиск не дал результатов, продолжаем обычный поиск
+        
         # Если это политический запрос, не ищем валютную информацию
         if self.is_politics_query(query):
             logger.info("Politics query detected, skipping currency search in DuckDuckGo")
@@ -1172,7 +1206,7 @@ class GeminiBot:
         return None
     
     async def search_news(self, query: str) -> Optional[str]:
-        """Улучшенный поиск актуальных новостей через NewsAPI с поддержкой 10+ политических новостей"""
+        """Улучшенный поиск актуальных новостей через NewsAPI с динамическим количеством статей"""
         logger.info(f"Starting News search for: {query[:50]}...")
         
         if not self.news_client:
@@ -1180,26 +1214,42 @@ class GeminiBot:
             return None
             
         try:
+            # Извлекаем числа из запроса пользователя
+            requested_numbers = self.extract_numbers_from_query(query)
+            requested_count = max(requested_numbers) if requested_numbers else 10  # По умолчанию 10
+            
+            # Ограничиваем максимальным разумным количеством (для API лимитов)
+            max_possible_articles = min(requested_count, 100)  # Максимум 100 статей
+            
+            logger.info(f"User requested {requested_count} articles, will try to get up to {max_possible_articles}")
+            
             # Интеллектуальная логика поиска для разных типов запросов
             search_queries = []
-            max_articles_per_query = 3  # По умолчанию
-            max_total_articles = 6     # По умолчанию
-            articles_per_search = 2    # По умолчанию
             
-            # Для политических запросов - МАКСИМУМ статей
-            if self.is_politics_query(query):
+            # Для погодных запросов
+            if self.is_weather_query(query):
+                search_queries = [
+                    'погода россия',
+                    'прогноз погоды',
+                    'климат температура',
+                    'метеопрогноз'
+                ]
+                logger.info("Weather news search queries prepared")
+            # Для политических запросов
+            elif self.is_politics_query(query):
                 search_queries = [
                     'политика россия',
                     'правительство россия',
                     'госдума новости',
                     'российская политика',
                     'внутренняя политика',
-                    'кремль политика'
+                    'кремль политика',
+                    'путин новости',
+                    'министерство россия',
+                    'государственная дума',
+                    'федеральное собрание'
                 ]
-                max_articles_per_query = 6  # Больше статей на запрос
-                max_total_articles = 15     # Больше общих статей
-                articles_per_search = 4     # Больше статей с каждого поиска
-                logger.info("Politics news search queries prepared - targeting 10+ articles")
+                logger.info(f"Politics news search queries prepared - targeting {max_possible_articles} articles")
             # Для валютных запросов
             elif self.is_currency_query(query):
                 search_queries = [
@@ -1209,9 +1259,6 @@ class GeminiBot:
                     'курс рубля',
                     'экономика валюта'
                 ]
-                max_articles_per_query = 4
-                max_total_articles = 8
-                articles_per_search = 3
                 logger.info("Currency news search queries prepared")
             # Для общих запросов о новостях
             elif any(word in query.lower() for word in ['новости', 'последние', 'актуальные', 'сегодня', 'происходит']):
@@ -1222,9 +1269,6 @@ class GeminiBot:
                     'российские новости',
                     'политика экономика'
                 ]
-                max_articles_per_query = 5
-                max_total_articles = 12
-                articles_per_search = 3
             # Для экономических запросов
             elif any(word in query.lower() for word in ['экономика', 'рынок', 'финансы', 'бизнес']):
                 search_queries = [
@@ -1232,17 +1276,18 @@ class GeminiBot:
                     'финансовые рынки',
                     'бизнес новости'
                 ]
-                max_articles_per_query = 4
-                max_total_articles = 8
-                articles_per_search = 3
             else:
                 # Для специфических запросов
                 search_queries = [query]
             
-            all_articles = []
+            # Вычисляем динамические параметры на основе запрошенного количества
+            articles_per_search = max(3, min(10, max_possible_articles // len(search_queries)))
+            max_articles_per_query = max(5, min(20, max_possible_articles // 2))
+            max_searches = min(10, len(search_queries))  # Максимум 10 поисковых запросов
             
-            # Увеличиваем количество поисковых запросов для политических новостей
-            max_searches = 6 if self.is_politics_query(query) else 4
+            logger.info(f"Search parameters: {articles_per_search} articles per search, {max_articles_per_query} per query, {max_searches} searches")
+            
+            all_articles = []
             
             for search_query in search_queries[:max_searches]:
                 try:
@@ -1283,21 +1328,28 @@ class GeminiBot:
                     continue
             
             if all_articles:
-                # Для политических запросов возвращаем больше статей
-                if self.is_politics_query(query):
-                    final_articles = all_articles[:12]  # До 12 политических новостей
-                    logger.info(f"NewsAPI politics search completed: {len(final_articles)} articles found")
-                    return f"🏛️ ПОЛИТИЧЕСКИЕ НОВОСТИ (найдено {len(final_articles)}):\n\n" + '\n\n'.join(final_articles)
+                # Возвращаем запрошенное количество статей
+                final_articles = all_articles[:max_possible_articles]
+                logger.info(f"NewsAPI search completed: {len(final_articles)} articles found (requested: {requested_count})")
+                
+                # Формируем заголовок в зависимости от типа запроса
+                if self.is_weather_query(query):
+                    title = f"🌤️ НОВОСТИ О ПОГОДЕ (найдено {len(final_articles)} из {requested_count})"
+                elif self.is_politics_query(query):
+                    title = f"🏛️ ПОЛИТИЧЕСКИЕ НОВОСТИ (найдено {len(final_articles)} из {requested_count})"
                 elif self.is_currency_query(query):
-                    final_articles = all_articles[:6]
-                    logger.info(f"NewsAPI currency search completed: {len(final_articles)} articles found")
-                    return f"💰 ФИНАНСОВЫЕ НОВОСТИ:\n\n" + '\n\n'.join(final_articles)
+                    title = f"💰 ФИНАНСОВЫЕ НОВОСТИ (найдено {len(final_articles)} из {requested_count})"
                 else:
-                    final_articles = all_articles[:8]  # Больше общих новостей
-                    logger.info(f"NewsAPI general search completed: {len(final_articles)} articles found")
-                    return f"📰 АКТУАЛЬНЫЕ НОВОСТИ:\n\n" + '\n\n'.join(final_articles)
+                    title = f"📰 АКТУАЛЬНЫЕ НОВОСТИ (найдено {len(final_articles)} из {requested_count})"
+                
+                # Добавляем уведомление, если найдено меньше чем запрошено
+                if len(final_articles) < requested_count:
+                    title += f"\n\n⚠️ Найдено только {len(final_articles)} статей. Увеличьте диапазон дат или измените запрос для получения большего количества."
+                
+                return f"{title}:\n\n" + '\n\n'.join(final_articles)
             else:
                 logger.warning(f"NewsAPI: No articles found for any query")
+                return f"❌ К сожалению, по запросу '{query}' новости не найдены. Попробуйте изменить запрос или проверить правописание."
                 
         except Exception as e:
             logger.error(f"NewsAPI search error: {e}")
@@ -1324,8 +1376,10 @@ class GeminiBot:
             'стоимость доллара', 'стоимость евро', 'цена биткоина',
             'финансы', 'экономика', 'рынок', 'торги', 'биржа',
             
-            # Погода и изменяющиеся данные
-            'погода', 'температура',
+            # Погода и изменяющиеся данные (расширенный список)
+            'погода', 'температура', 'прогноз', 'климат', 'дождь', 'снег', 
+            'солнце', 'облачно', 'ветер', 'влажность', 'давление',
+            'тепло', 'холодно', 'жарко', 'морозно', 'градус',
             
             # Свежая информация
             '2024', '2025', 'этот год', 'этот месяц', 'на данный момент',
@@ -1334,7 +1388,8 @@ class GeminiBot:
             # Английские аналоги
             'today', 'now', 'current', 'latest', 'recent', 'news', 'update',
             'what date', 'what time', 'what day', 'what month', 'what year',
-            'exchange rate', 'currency', 'dollar', 'euro', 'ruble', 'bitcoin'
+            'exchange rate', 'currency', 'dollar', 'euro', 'ruble', 'bitcoin',
+            'weather', 'temperature', 'forecast', 'rain', 'snow', 'sunny'
         ]
         
         query_lower = query.lower()
@@ -1373,6 +1428,11 @@ class GeminiBot:
         if self.is_currency_query(query):
             result = True
             logger.info("Currency query detected, current data needed")
+        
+        # Специальная проверка для погодных запросов
+        if self.is_weather_query(query):
+            result = True
+            logger.info("Weather query detected, current data needed")
         
         logger.info(f"Current data needed for query '{query[:50]}...': {result}")
         return result
@@ -1471,6 +1531,110 @@ class GeminiBot:
         
         query_lower = query.lower()
         return any(keyword in query_lower for keyword in politics_keywords)
+
+    def extract_numbers_from_query(self, query: str) -> List[int]:
+        """Извлекает числа из запроса пользователя"""
+        import re
+        # Ищем все числа в тексте
+        numbers = re.findall(r'\b(\d+)\b', query)
+        return [int(num) for num in numbers if int(num) > 0]
+    
+    def is_weather_query(self, query: str) -> bool:
+        """Определяет, является ли запрос о погоде"""
+        weather_keywords = [
+            'погода', 'температура', 'прогноз', 'климат', 'дождь', 'снег', 
+            'солнце', 'облачно', 'ветер', 'влажность', 'давление',
+            'weather', 'temperature', 'forecast', 'rain', 'snow', 'sunny',
+            'градус', 'тепло', 'холодно', 'жарко', 'морозно'
+        ]
+        
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in weather_keywords)
+
+    async def search_weather_data(self, query: str) -> Optional[str]:
+        """Специальный поиск погодных данных"""
+        logger.info(f"Starting weather search for: {query[:50]}...")
+        
+        try:
+            # Извлекаем города из запроса
+            cities = []
+            query_lower = query.lower()
+            
+            # Популярные города для погодного поиска
+            city_patterns = {
+                'москва': ['москва', 'moscow'],
+                'анталия': ['анталия', 'анталья', 'antalya'],
+                'стамбул': ['стамбул', 'istanbul'],
+                'сочи': ['сочи', 'sochi'],
+                'санкт-петербург': ['петербург', 'спб', 'питер', 'saint petersburg'],
+                'екатеринбург': ['екатеринбург', 'yekaterinburg'],
+                'новосибирск': ['новосибирск', 'novosibirsk'],
+                'казань': ['казань', 'kazan'],
+                'нижний новгород': ['нижний новгород', 'nizhny novgorod'],
+                'красноярск': ['красноярск', 'krasnoyarsk']
+            }
+            
+            for city, patterns in city_patterns.items():
+                if any(pattern in query_lower for pattern in patterns):
+                    cities.append(city)
+            
+            # Если города не найдены, используем общий поиск
+            if not cities:
+                cities = ['россия погода']
+            
+            weather_info = []
+            
+            # Поиск погодной информации через DuckDuckGo
+            for city in cities[:3]:  # Максимум 3 города
+                search_query = f"погода {city} сегодня прогноз"
+                
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        params = {
+                            'q': search_query,
+                            'format': 'json',
+                            'no_html': '1',
+                            'skip_disambig': '1'
+                        }
+                        
+                        async with session.get('https://api.duckduckgo.com/', params=params, timeout=5) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                
+                                # Проверяем различные поля ответа
+                                result_text = ""
+                                if data.get('Abstract'):
+                                    result_text = data['Abstract']
+                                elif data.get('Answer'):
+                                    result_text = data['Answer']
+                                elif data.get('Definition'):
+                                    result_text = data['Definition']
+                                
+                                if result_text and len(result_text) > 50:
+                                    weather_info.append(f"🌤️ {city.title()}: {result_text}")
+                                    
+                    except Exception as search_error:
+                        logger.error(f"Weather search error for {city}: {search_error}")
+                        continue
+            
+            if weather_info:
+                from datetime import datetime
+                import pytz
+                moscow_tz = pytz.timezone('Europe/Moscow')
+                now = datetime.now(moscow_tz)
+                
+                result = f"🌤️ ПОГОДНАЯ ИНФОРМАЦИЯ (обновлено {now.strftime('%d.%m.%Y %H:%M')} МСК):\n\n"
+                result += "\n\n".join(weather_info)
+                
+                logger.info(f"Weather search completed: {len(weather_info)} forecasts found")
+                return result
+            else:
+                logger.warning("No weather data found")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Weather search error: {e}")
+            return None
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
