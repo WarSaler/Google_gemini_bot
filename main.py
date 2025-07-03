@@ -1213,14 +1213,15 @@ class GeminiBot:
         politics_keywords = [
             'политика', 'политические', 'политических', 'политические новости',
             'политика россии', 'политика в мире', 'новости политики', 'последние новости политики',
-            'политическая ситуация', 'политические события', 'политическое'
+            'политическая ситуация', 'политические события', 'политическое', 'политических новостей',
+            'политика сша', 'политика китая', 'политика европы', 'геополитика', 'внешняя политика'
         ]
         
         query_lower = query.lower()
         
         # Проверяем наличие ключевых слов
         has_politics = any(keyword in query_lower for keyword in politics_keywords)
-        has_news = 'новости' in query_lower or 'новость' in query_lower
+        has_news = 'новости' in query_lower or 'новость' in query_lower or 'последние' in query_lower
         
         return has_politics or (has_news and 'политик' in query_lower)
 
@@ -1237,8 +1238,11 @@ class GeminiBot:
         # Инициализируем NewsAPI клиент, если есть ключ
         newsapi = None
         if NEWS_API_KEY:
-            newsapi = NewsApiClient(api_key=NEWS_API_KEY)
-            logger.info("NewsAPI initialized: Yes")
+            try:
+                newsapi = NewsApiClient(api_key=NEWS_API_KEY)
+                logger.info("NewsAPI initialized: Yes")
+            except Exception as e:
+                logger.error(f"Error initializing NewsAPI: {e}")
         else:
             logger.warning("NewsAPI not initialized: No API key")
 
@@ -1264,8 +1268,9 @@ class GeminiBot:
                     # Формируем поисковый запрос
                     search_query = query_terms
                     if is_politics:
-                        search_query = 'политика россия'
+                        search_query = 'политика россия сегодня'
                     
+                    # Сначала пробуем получить главные новости
                     top_headlines = newsapi.get_top_headlines(
                         q=search_query,
                         language=language,
@@ -1288,7 +1293,7 @@ class GeminiBot:
                         seen_titles = set()
                         unique_articles = []
                         for article in all_articles:
-                            if article['title'] not in seen_titles:
+                            if article.get('title') and article['title'] not in seen_titles:
                                 seen_titles.add(article['title'])
                                 unique_articles.append(article)
                                 
@@ -1297,8 +1302,26 @@ class GeminiBot:
                         news_results = top_headlines.get('articles', [])[:max_news]
                         
                     logger.info(f"NewsAPI found {len(news_results)} articles")
+                    
+                    # Если NewsAPI не вернул результатов, пробуем еще раз с более широким запросом
+                    if not news_results and is_politics:
+                        try:
+                            wider_query = "новости политика международные"
+                            logger.info(f"Retrying NewsAPI with wider query: {wider_query}")
+                            everything = newsapi.get_everything(
+                                q=wider_query,
+                                language=language,
+                                sort_by='publishedAt',
+                                page_size=max_news
+                            )
+                            news_results = everything.get('articles', [])[:max_news]
+                            logger.info(f"NewsAPI wider search found {len(news_results)} articles")
+                        except Exception as wider_error:
+                            logger.error(f"NewsAPI wider search error: {wider_error}")
                 except Exception as e:
                     logger.error(f"NewsAPI error: {e}")
+                    # Сбрасываем NewsAPI при ошибке, чтобы попробовать резервный метод
+                    newsapi = None
             
             # Если нет результатов из NewsAPI, используем DuckDuckGo
             if not news_results:
@@ -1306,15 +1329,21 @@ class GeminiBot:
                 
                 search_terms = query_terms
                 if is_politics:
-                    search_terms = "последние политические новости россия"
+                    search_terms = "последние политические новости россия сегодня"
                 
                 # Поиск через DuckDuckGo
                 try:
                     async with aiohttp.ClientSession() as session:
+                        # Создаем URL-safe строку запроса
+                        from urllib.parse import quote
+                        safe_search_terms = quote(f"{search_terms} последние новости")
+                        
                         response = await session.get(
-                            f"https://html.duckduckgo.com/html/?q={search_terms}+последние+новости", 
+                            f"https://html.duckduckgo.com/html/?q={safe_search_terms}", 
                             headers={
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                                'Accept': 'text/html,application/xhtml+xml',
+                                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
                             }
                         )
                         if response.status == 200:
@@ -1326,22 +1355,32 @@ class GeminiBot:
                             results = soup.find_all('div', {'class': 'result__body'})
                             
                             for result in results[:max_news]:  # Ограничиваем количеством
-                                title = result.find('h2')
-                                link = result.find('a', {'class': 'result__a'})
-                                snippet = result.find('a', {'class': 'result__snippet'})
+                                title_elem = result.find('a', {'class': 'result__a'})
+                                snippet_elem = result.find('a', {'class': 'result__snippet'})
                                 
-                                if title and link and snippet:
-                                    title_text = title.get_text().strip()
-                                    url = link.get('href')
-                                    description = snippet.get_text().strip()
+                                if title_elem and snippet_elem:
+                                    title_text = title_elem.get_text().strip()
+                                    url = title_elem.get('href')
+                                    description = snippet_elem.get_text().strip()
+                                    
+                                    # Получаем домен как источник
+                                    source_name = "Новостной ресурс"
+                                    try:
+                                        from urllib.parse import urlparse
+                                        domain = urlparse(url).netloc
+                                        if domain:
+                                            source_name = domain.replace('www.', '')
+                                    except:
+                                        pass
                                     
                                     # Формируем временную структуру новости
-                                    news_results.append({
-                                        'title': title_text,
-                                        'url': url,
-                                        'description': description,
-                                        'source': {'name': 'DuckDuckGo Search'}
-                                    })
+                                    if len(title_text) > 10 and len(description) > 15:  # Минимальная валидация
+                                        news_results.append({
+                                            'title': title_text,
+                                            'url': url,
+                                            'description': description,
+                                            'source': {'name': source_name}
+                                        })
                 except Exception as e:
                     logger.error(f"DuckDuckGo search error: {e}")
             
@@ -1371,6 +1410,10 @@ class GeminiBot:
                     url = article.get('url', '')
                     description = article.get('description', '').replace('\n', ' ').strip()
                     
+                    # Усечение слишком длинных описаний
+                    if description and len(description) > 200:
+                        description = description[:197] + "..."
+                    
                     # Формируем текст новости
                     news_text = f"{i}. *{title}*\n" + \
                               f"_{source}_\n" + \
@@ -1383,7 +1426,7 @@ class GeminiBot:
                 result += "\n\n".join(news_items)
                 
                 # Добавляем информацию о возможности запросить больше новостей
-                result += "\n\n_Вы можете запросить до 50 новостей, указав количество в запросе._"
+                result += f"\n\n_Вы можете запросить до 50 новостей, указав количество в запросе, например: «{max_news} политических новостей»._"
                 
                 logger.info(f"News search completed: {len(news_items)} articles found")
                 return result
@@ -1571,6 +1614,10 @@ class GeminiBot:
         """Специальный поиск погодных данных через API погоды"""
         logger.info(f"Starting weather search for: {query[:50]}...")
         
+        # Импортируем необходимые модули
+        import aiohttp
+        from bs4 import BeautifulSoup
+        
         try:
             # Извлекаем города из запроса
             cities = []
@@ -1600,119 +1647,167 @@ class GeminiBot:
             
             weather_info = []
             
-            # Поиск погодной информации через API погоды и веб-парсинг
-            import aiohttp
-            from bs4 import BeautifulSoup
-            
             for city in cities[:3]:  # Максимум 3 города
-                # Метод 1: Yandex погода (парсинг)
-                try:
-                    city_encoded = city.replace(' ', '+')
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-                        'Connection': 'keep-alive'
-                    }
-                    
-                    # Попытка через realtime погоду
-                    async with aiohttp.ClientSession() as session:
-                        url = f"https://api.realtimeweb.ru/api/getweather?city={city_encoded}"
-                        async with session.get(url, headers=headers) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                if data.get('success'):
-                                    w = data.get('data', {})
-                                    text = f"Температура: {w.get('temperature', 'н/д')}°C, " + \
-                                          f"ощущается как {w.get('feels_like', 'н/д')}°C. " + \
-                                          f"{w.get('description', 'н/д')}. " + \
-                                          f"Влажность: {w.get('humidity', 'н/д')}%, " + \
-                                          f"ветер {w.get('wind_speed', 'н/д')} м/с ({w.get('wind_direction', 'н/д')})."
+                # Используем несколько методов и собираем все успешные результаты
+                city_weather_found = False
+                
+                # Метод 1: OpenWeather Map API
+                if not city_weather_found:
+                    try:
+                        city_map = {
+                            'москва': 'Moscow',
+                            'анталия': 'Antalya',
+                            'стамбул': 'Istanbul',
+                            'сочи': 'Sochi',
+                            'санкт-петербург': 'Saint Petersburg',
+                            'екатеринбург': 'Yekaterinburg',
+                            'новосибирск': 'Novosibirsk',
+                            'казань': 'Kazan',
+                            'нижний новгород': 'Nizhny Novgorod',
+                            'красноярск': 'Krasnoyarsk'
+                        }
+                        
+                        city_en = city_map.get(city.lower(), city)
+                        
+                        async with aiohttp.ClientSession() as session:
+                            url = f"https://api.openweathermap.org/data/2.5/weather?q={city_en}&units=metric&lang=ru&appid=12464dd6965b11c90563e796495fc334"
+                            async with session.get(url, timeout=10) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    
+                                    # Перевод направления ветра
+                                    wind_dir = ""
+                                    deg = data.get('wind', {}).get('deg', 0)
+                                    if deg > 337.5 or deg <= 22.5: wind_dir = "северный"
+                                    elif deg <= 67.5: wind_dir = "северо-восточный"
+                                    elif deg <= 112.5: wind_dir = "восточный"
+                                    elif deg <= 157.5: wind_dir = "юго-восточный"
+                                    elif deg <= 202.5: wind_dir = "южный"
+                                    elif deg <= 247.5: wind_dir = "юго-западный"
+                                    elif deg <= 292.5: wind_dir = "западный"
+                                    else: wind_dir = "северо-западный"
+                                    
+                                    temp = data.get('main', {}).get('temp', 'н/д')
+                                    feels_like = data.get('main', {}).get('feels_like', 'н/д')
+                                    description = data.get('weather', [{}])[0].get('description', 'н/д')
+                                    humidity = data.get('main', {}).get('humidity', 'н/д')
+                                    wind_speed = data.get('wind', {}).get('speed', 'н/д')
+                                    pressure = data.get('main', {}).get('pressure', 'н/д')
+                                    
+                                    text = f"Температура: {temp}°C, " + \
+                                        f"ощущается как {feels_like}°C. " + \
+                                        f"{description.capitalize()}. " + \
+                                        f"Влажность: {humidity}%, " + \
+                                        f"давление: {int(pressure * 0.75)} мм рт.ст., " + \
+                                        f"ветер {wind_speed} м/с ({wind_dir})."
+                                        
                                     weather_info.append(f"🌤️ {city.title()}: {text}")
+                                    city_weather_found = True
+                                    logger.info(f"OpenWeatherMap data found for {city}")
                                     continue
-                except Exception as e:
-                    logger.error(f"Weather API error for {city}: {e}")
+                    except Exception as e:
+                        logger.error(f"OpenWeather API error for {city}: {e}")
                 
-                # Метод 2: OpenWeather Map с моими переводами
-                try:
-                    city_map = {
-                        'москва': 'Moscow',
-                        'анталия': 'Antalya',
-                        'стамбул': 'Istanbul',
-                        'сочи': 'Sochi',
-                        'санкт-петербург': 'Saint Petersburg',
-                        'екатеринбург': 'Yekaterinburg',
-                        'новосибирск': 'Novosibirsk',
-                        'казань': 'Kazan',
-                        'нижний новгород': 'Nizhny Novgorod',
-                        'красноярск': 'Krasnoyarsk'
-                    }
-                    
-                    city_en = city_map.get(city.lower(), city)
-                    
-                    async with aiohttp.ClientSession() as session:
-                        url = f"https://api.openweathermap.org/data/2.5/weather?q={city_en}&units=metric&lang=ru&appid=12464dd6965b11c90563e796495fc334"
-                        async with session.get(url) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                
-                                # Перевод описаний
-                                wind_dir = ""
-                                deg = data.get('wind', {}).get('deg', 0)
-                                if deg > 337.5 or deg <= 22.5: wind_dir = "северный"
-                                elif deg <= 67.5: wind_dir = "северо-восточный"
-                                elif deg <= 112.5: wind_dir = "восточный"
-                                elif deg <= 157.5: wind_dir = "юго-восточный"
-                                elif deg <= 202.5: wind_dir = "южный"
-                                elif deg <= 247.5: wind_dir = "юго-западный"
-                                elif deg <= 292.5: wind_dir = "западный"
-                                else: wind_dir = "северо-западный"
-                                
-                                temp = data.get('main', {}).get('temp', 'н/д')
-                                feels_like = data.get('main', {}).get('feels_like', 'н/д')
-                                description = data.get('weather', [{}])[0].get('description', 'н/д')
-                                humidity = data.get('main', {}).get('humidity', 'н/д')
-                                wind_speed = data.get('wind', {}).get('speed', 'н/д')
-                                pressure = data.get('main', {}).get('pressure', 'н/д')
-                                
-                                text = f"Температура: {temp}°C, " + \
-                                      f"ощущается как {feels_like}°C. " + \
-                                      f"{description.capitalize()}. " + \
-                                      f"Влажность: {humidity}%, " + \
-                                      f"давление: {int(pressure * 0.75)} мм рт.ст., " + \
-                                      f"ветер {wind_speed} м/с ({wind_dir})."
-                                      
-                                weather_info.append(f"🌤️ {city.title()}: {text}")
-                                continue
-                except Exception as e:
-                    logger.error(f"OpenWeather API error for {city}: {e}")
+                # Метод 2: RealTimeWeb API
+                if not city_weather_found:
+                    try:
+                        city_encoded = city.replace(' ', '+')
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                            'Connection': 'keep-alive'
+                        }
+                        
+                        # Попытка через realtime погоду
+                        async with aiohttp.ClientSession() as session:
+                            url = f"https://api.realtimeweb.ru/api/getweather?city={city_encoded}"
+                            async with session.get(url, headers=headers, timeout=10) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    if data.get('success'):
+                                        w = data.get('data', {})
+                                        text = f"Температура: {w.get('temperature', 'н/д')}°C, " + \
+                                            f"ощущается как {w.get('feels_like', 'н/д')}°C. " + \
+                                            f"{w.get('description', 'н/д')}. " + \
+                                            f"Влажность: {w.get('humidity', 'н/д')}%, " + \
+                                            f"ветер {w.get('wind_speed', 'н/д')} м/с ({w.get('wind_direction', 'н/д')})."
+                                        weather_info.append(f"🌤️ {city.title()}: {text}")
+                                        city_weather_found = True
+                                        logger.info(f"RealTimeWeb data found for {city}")
+                                        continue
+                    except Exception as e:
+                        logger.error(f"RealTimeWeb API error for {city}: {e}")
                 
-                # Метод 3: Fallback - DuckDuckGo
-                try:
-                    search_query = f"погода {city} сегодня прогноз"
-                    async with aiohttp.ClientSession() as session:
-                        response = await session.get(
-                            f"https://html.duckduckgo.com/html/?q={search_query}", 
-                            headers={
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-                            }
-                        )
-                        if response.status == 200:
-                            html = await response.text()
-                            soup = BeautifulSoup(html, 'html.parser')
-                            
-                            # Извлекаем результаты поиска
-                            results = soup.find_all('div', {'class': 'result__body'})
-                            for result in results[:2]:
-                                title = result.find('h2')
-                                snippet = result.find('a', {'class': 'result__snippet'})
-                                
-                                if title and snippet and "погода" in snippet.text.lower() and len(snippet.text) > 50:
-                                    # Здесь создаем собственный прогноз из результатов поиска
-                                    weather_info.append(f"🌤️ {city.title()}: {snippet.text.strip()}")
-                                    break
-                except Exception as e:
-                    logger.error(f"DuckDuckGo weather search error for {city}: {e}")
+                # Метод 3: DuckDuckGo парсинг (резервный)
+                if not city_weather_found:
+                    try:
+                        from urllib.parse import quote
+                        search_query = quote(f"погода {city} сегодня прогноз")
+                        
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                f"https://html.duckduckgo.com/html/?q={search_query}", 
+                                headers={
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                                    'Accept': 'text/html,application/xhtml+xml',
+                                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+                                },
+                                timeout=15
+                            ) as response:
+                                if response.status == 200:
+                                    html = await response.text()
+                                    soup = BeautifulSoup(html, 'html.parser')
+                                    
+                                    # Извлекаем результаты поиска
+                                    results = soup.find_all('div', {'class': 'result__body'})
+                                    
+                                    # Получаем фрагменты текста с погодной информацией
+                                    weather_snippets = []
+                                    for result in results[:3]:
+                                        snippet = result.find('a', {'class': 'result__snippet'})
+                                        if snippet:
+                                            snippet_text = snippet.text.strip()
+                                            # Проверяем, что текст похож на погодную информацию
+                                            if any(kw in snippet_text.lower() for kw in ['°c', 'градус', 'температур', 'погода']):
+                                                weather_snippets.append(snippet_text)
+                                    
+                                    if weather_snippets:
+                                        # Берем самый длинный и информативный фрагмент
+                                        best_snippet = max(weather_snippets, key=len)
+                                        weather_info.append(f"🌤️ {city.title()}: {best_snippet}")
+                                        city_weather_found = True
+                                        logger.info(f"DuckDuckGo data found for {city}")
+                                        continue
+                                        
+                                    # Если специфичную информацию не нашли, используем общую информацию
+                                    if not city_weather_found:
+                                        for result in results[:2]:
+                                            title = result.find('a', {'class': 'result__a'})
+                                            snippet = result.find('a', {'class': 'result__snippet'})
+                                            
+                                            if title and snippet and "погода" in snippet.text.lower():
+                                                url = title.get('href', '')
+                                                source = "метеоданных"
+                                                try:
+                                                    from urllib.parse import urlparse
+                                                    domain = urlparse(url).netloc
+                                                    if domain:
+                                                        source = domain.replace('www.', '')
+                                                except:
+                                                    pass
+                                                
+                                                weather_info.append(f"🌤️ {city.title()}: Прогноз погоды доступен на сайте {source}: {url}")
+                                                city_weather_found = True
+                                                logger.info(f"DuckDuckGo URL found for {city}")
+                                                break
+                    except Exception as e:
+                        logger.error(f"DuckDuckGo weather search error for {city}: {e}")
+                
+                # Если ни один метод не сработал, добавляем сообщение об ошибке
+                if not city_weather_found:
+                    weather_info.append(f"🌤️ {city.title()}: Не удалось получить прогноз погоды.")
+                    logger.warning(f"No weather data found for {city}")
             
             if weather_info:
                 from datetime import datetime
@@ -1829,6 +1924,20 @@ async def run_bot():
     await application.initialize()
     await application.start()
     
+    # Определяем, в каком окружении мы находимся - Render или локальное
+    is_production = os.environ.get('IS_RENDER') == 'true'
+    
+    # Проверяем текущее состояние webhook перед очисткой
+    try:
+        webhook_info = await application.bot.get_webhook_info()
+        logger.info(f"Initial webhook state: URL={webhook_info.url}, Pending Updates={webhook_info.pending_update_count}")
+        
+        # Если обнаружен активный webhook, отключаем его
+        if webhook_info.url:
+            logger.info(f"Found active webhook at {webhook_info.url}, removing...")
+    except Exception as e:
+        logger.error(f"Error getting webhook info: {e}")
+    
     # Агрессивная очистка webhook и предыдущих подключений
     logger.info("Performing ULTRA-aggressive webhook cleanup...")
     
@@ -1848,36 +1957,94 @@ async def run_bot():
     except Exception as e:
         logger.warning(f"Force clear failed: {e}")
     
-    cleanup_attempts = 8  # Увеличено с 5 до 8
+    # Агрессивная очистка webhook
+    cleanup_attempts = 10  # Увеличено до 10
+    webhook_cleared = False
     for attempt in range(cleanup_attempts):
         try:
             logger.info(f"Webhook cleanup attempt {attempt + 1}/{cleanup_attempts}")
             
             # Множественная очистка webhook
             await application.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(1)
-            await application.bot.delete_webhook()
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)  # Увеличено время ожидания
             
-            # Дополнительная очистка с различными параметрами
-            try:
-                await application.bot.set_webhook("")  # Пустой webhook
-                await asyncio.sleep(1)
-                await application.bot.delete_webhook(drop_pending_updates=True)
-            except:
-                pass
+            # Проверяем текущий webhook и логируем для отладки
+            webhook_info = await application.bot.get_webhook_info()
+            logger.info(f"Current webhook: URL={webhook_info.url}, PendingUpdates={webhook_info.pending_update_count}")
+            
+            if not webhook_info.url:
+                logger.info("No webhook is set, good!")
+                webhook_cleared = True
+                break
+                
+            # Если webhook все еще настроен, пробуем еще раз
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(3)  # Еще больше ожидания
                 
             logger.info(f"Webhook cleanup attempt {attempt + 1} completed")
-            break
         except Exception as e:
             logger.warning(f"Webhook cleanup attempt {attempt + 1} failed: {e}")
             if attempt < cleanup_attempts - 1:
                 await asyncio.sleep(5)  # Увеличено время ожидания
     
+    if not webhook_cleared:
+        logger.warning("Could not completely clear webhook after multiple attempts!")
+        logger.warning("This might cause conflicts with multiple bot instances")
+    
     logger.info("Waiting for COMPLETE cleanup...")
     await asyncio.sleep(10)  # Увеличено с 5 до 10 секунд
     
-    # Запуск polling с улучшенным retry механизмом
+    # В зависимости от окружения выбираем метод получения обновлений
+    if is_production:
+        # В производственной среде используем webhook
+        try:
+            webhook_url = os.environ.get('WEBHOOK_URL', 'https://google-gemini-bot.onrender.com/webhook')
+            logger.info(f"Production environment detected, setting webhook to {webhook_url}")
+            
+            # Устанавливаем webhook
+            await application.bot.set_webhook(
+                url=webhook_url, 
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                secret_token="SuPerSecR3t" + TELEGRAM_TOKEN[:10]  # Добавляем секретный токен для безопасности
+            )
+            
+            # Проверяем, что webhook установлен
+            webhook_info = await application.bot.get_webhook_info()
+            if webhook_info.url:
+                logger.info(f"Webhook set successfully to {webhook_info.url}")
+                # Запускаем webhook сервер
+                await application.updater.start_webhook(
+                    listen="0.0.0.0",
+                    port=int(os.environ.get("PORT", 8443)),
+                    url_path="webhook",
+                    drop_pending_updates=True,
+                    webhook_url=webhook_url
+                )
+                logger.info("Webhook server started successfully")
+            else:
+                logger.error("Failed to set webhook, falling back to polling")
+                await start_polling(application)
+        except Exception as e:
+            logger.error(f"Error setting webhook: {e}")
+            logger.error("Falling back to polling")
+            await start_polling(application)
+    else:
+        # В локальной среде используем polling
+        logger.info("Development environment detected, using polling")
+        await start_polling(application)
+    
+    # Поддержание работы
+    try:
+        logger.info("Bot is now running and waiting for messages...")
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        logger.info("Stopping bot...")
+    finally:
+        await application.stop()
+
+async def start_polling(application):
+    """Запуск получения обновлений через polling с улучшенным механизмом повторных попыток"""
     max_retries = 5
     for attempt in range(max_retries):
         try:
@@ -1895,17 +2062,17 @@ async def run_bot():
             await application.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES, 
                 drop_pending_updates=True,
-                timeout=45,
-                pool_timeout=45,
-                connect_timeout=30,
-                read_timeout=30
+                timeout=60,
+                pool_timeout=60,
+                connect_timeout=45,
+                read_timeout=45
             )
             logger.info("Polling started successfully")
             break
         except Exception as e:
             logger.error(f"Polling failed on attempt {attempt + 1}: {e}")
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 15  # Увеличиваем время ожидания
+                wait_time = (attempt + 1) * 20  # Увеличиваем время ожидания
                 logger.info(f"Waiting {wait_time} seconds before retry...")
                 await asyncio.sleep(wait_time)
             else:
@@ -1915,15 +2082,6 @@ async def run_bot():
                 logger.error("2. Webhook is set externally")
                 logger.error("3. Network connectivity issues")
                 return
-    
-    # Поддержание работы
-    try:
-        logger.info("Bot is now running and waiting for messages...")
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        logger.info("Stopping bot...")
-    finally:
-        await application.stop()
 
 async def main():
     """Основная функция"""
