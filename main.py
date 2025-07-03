@@ -355,7 +355,7 @@ class GeminiBot:
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений"""
         # Начинаем печатать для UX
-        await update.message.chat.action("typing")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
         # Получаем сообщение пользователя
         user_message = update.message.text
@@ -378,7 +378,7 @@ class GeminiBot:
         self.add_request(user_id)
         
         # Отправляем "печатает" для лучшего UX
-        await update.message.chat.action("typing")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
         try:
             # Проверяем, нужны ли актуальные данные
@@ -1948,11 +1948,6 @@ async def run_bot():
     application.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
     application.add_error_handler(error_handler)
     
-    # Запуск бота
-    logger.info("Starting bot...")
-    await application.initialize()
-    await application.start()
-    
     # Определяем, в каком окружении мы находимся - Render или локальное
     is_production = os.environ.get('RENDER') is not None
     
@@ -1970,107 +1965,86 @@ async def run_bot():
     # Агрессивная очистка webhook и предыдущих подключений
     logger.info("Performing ULTRA-aggressive webhook cleanup...")
     
-    # Принудительная остановка всех предыдущих экземпляров
+    # Принудительная очистка всех обновлений
+    logger.info("Force clearing all pending updates...")
     try:
-        logger.info("Force clearing all pending updates...")
-        # Получаем и очищаем все pending updates
-        try:
-            updates = await application.bot.get_updates(timeout=1, limit=100)
-            if updates:
-                logger.info(f"Found {len(updates)} pending updates - clearing...")
-                # Получаем последний update_id для пропуска
-                last_update_id = updates[-1].update_id
-                await application.bot.get_updates(offset=last_update_id + 1, timeout=1)
-        except Exception as e:
-            logger.info(f"Pending updates clear attempt: {e}")
+        await application.bot.get_updates(offset=-1)
     except Exception as e:
-        logger.warning(f"Force clear failed: {e}")
+        logger.error(f"Error clearing updates: {e}")
     
-    # Агрессивная очистка webhook
-    cleanup_attempts = 10  # Увеличено до 10
-    webhook_cleared = False
-    for attempt in range(cleanup_attempts):
+    # Несколько попыток удалить webhook
+    success = False
+    for attempt in range(10):
         try:
-            logger.info(f"Webhook cleanup attempt {attempt + 1}/{cleanup_attempts}")
-            
-            # Множественная очистка webhook
+            logger.info(f"Webhook cleanup attempt {attempt+1}/10")
             await application.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(2)  # Увеличено время ожидания
-            
-            # Проверяем текущий webhook и логируем для отладки
-            webhook_info = await application.bot.get_webhook_info()
-            logger.info(f"Current webhook: URL={webhook_info.url}, PendingUpdates={webhook_info.pending_update_count}")
-            
-            if not webhook_info.url:
-                logger.info("No webhook is set, good!")
-                webhook_cleared = True
-                break
-                
-            # Если webhook все еще настроен, пробуем еще раз
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(3)  # Еще больше ожидания
-                
-            logger.info(f"Webhook cleanup attempt {attempt + 1} completed")
+            success = True
+            break
         except Exception as e:
-            logger.warning(f"Webhook cleanup attempt {attempt + 1} failed: {e}")
-            if attempt < cleanup_attempts - 1:
-                await asyncio.sleep(5)  # Увеличено время ожидания
+            logger.error(f"Error deleting webhook (attempt {attempt+1}): {e}")
+            await asyncio.sleep(1)
     
-    if not webhook_cleared:
-        logger.warning("Could not completely clear webhook after multiple attempts!")
-        logger.warning("This might cause conflicts with multiple bot instances")
+    if not success:
+        logger.error("Failed to clean up webhook after multiple attempts")
     
+    # Проверяем состояние после очистки
+    try:
+        webhook_info = await application.bot.get_webhook_info()
+        logger.info(f"Current webhook: URL={webhook_info.url}, PendingUpdates={webhook_info.pending_update_count}")
+        
+        if not webhook_info.url:
+            logger.info("No webhook is set, good!")
+        else:
+            logger.warning(f"Webhook still set at {webhook_info.url}!")
+    except Exception as e:
+        logger.error(f"Error verifying webhook state: {e}")
+    
+    # Даем время на полную очистку
     logger.info("Waiting for COMPLETE cleanup...")
-    await asyncio.sleep(10)  # Увеличено с 5 до 10 секунд
+    await asyncio.sleep(10)
     
-    # В зависимости от окружения выбираем метод получения обновлений
+    # Запускаем бота в соответствующем режиме
     if is_production:
-        # В производственной среде используем webhook
+        # В производственной среде (Render) используем webhook
+        webhook_url = "https://google-gemini-bot.onrender.com/webhook"
+        logger.info(f"Production environment detected, setting webhook to {webhook_url}")
+        
         try:
-            webhook_url = os.environ.get('WEBHOOK_URL', 'https://google-gemini-bot.onrender.com/webhook')
-            logger.info(f"Production environment detected, setting webhook to {webhook_url}")
-            
             # Устанавливаем webhook
-            await application.bot.set_webhook(
-                url=webhook_url, 
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES,
-                secret_token="SuPerSecR3t" + TELEGRAM_TOKEN[:10]  # Добавляем секретный токен для безопасности
-            )
+            await application.bot.set_webhook(url=webhook_url)
             
             # Проверяем, что webhook установлен
             webhook_info = await application.bot.get_webhook_info()
-            if webhook_info.url:
-                logger.info(f"Webhook set successfully to {webhook_info.url}")
-                # Запускаем webhook сервер
-                await application.updater.start_webhook(
-                    listen="0.0.0.0",
-                    port=int(os.environ.get("PORT", 8443)),
-                    url_path="webhook",
-                    drop_pending_updates=True,
-                    webhook_url=webhook_url
-                )
-                logger.info("Webhook server started successfully")
+            if webhook_info.url == webhook_url:
+                logger.info(f"Webhook set successfully to {webhook_url}")
+                
+                # Запускаем приложение в режиме webhook
+                try:
+                    # Обратите внимание, что для webhooks требуется установка через pip install "python-telegram-bot[webhooks]"
+                    await application.start()
+                    await application.updater.start_webhook(
+                        listen="0.0.0.0",
+                        port=int(os.environ.get("PORT", 10000)),
+                        url_path="webhook",
+                        webhook_url=webhook_url
+                    )
+                    logger.info("Webhook started successfully")
+                except Exception as e:
+                    logger.error(f"Error setting webhook: {e}")
+                    logger.error("Falling back to polling")
+                    await start_polling(application)
             else:
-                logger.error("Failed to set webhook, falling back to polling")
+                logger.error(f"Failed to set webhook: Current URL is {webhook_info.url}")
                 await start_polling(application)
         except Exception as e:
-            logger.error(f"Error setting webhook: {e}")
-            logger.error("Falling back to polling")
+            logger.error(f"Error setting up webhook: {e}")
             await start_polling(application)
     else:
-        # В локальной среде используем polling
-        logger.info("Development environment detected, using polling")
+        # В локальной среде используем поллинг
+        logger.info("Local environment detected, using polling")
         await start_polling(application)
     
-    # Поддержание работы
-    try:
-        logger.info("Bot is now running and waiting for messages...")
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        logger.info("Stopping bot...")
-    finally:
-        await application.stop()
+    logger.info("Bot is now running and waiting for messages...")
 
 async def start_polling(application, max_attempts=5):
     """Запуск бота в режиме поллинга с повторными попытками"""
