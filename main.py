@@ -15,6 +15,7 @@ from pydub import AudioSegment
 from gtts import gTTS
 import wikipedia
 from newsapi import NewsApiClient
+from bs4 import BeautifulSoup
 
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -242,6 +243,8 @@ class GeminiBot:
 
     async def call_gemini_api(self, messages: List[dict]) -> Optional[str]:
         """Вызов API Gemini"""
+        import aiohttp  # Добавляем импорт здесь для предотвращения UnboundLocalError
+        
         headers = {
             'Content-Type': 'application/json',
         }
@@ -1205,158 +1208,192 @@ class GeminiBot:
             
         return None
     
-    async def search_news(self, query: str) -> Optional[str]:
-        """Улучшенный поиск актуальных новостей через NewsAPI с динамическим количеством статей"""
-        logger.info(f"Starting News search for: {query[:50]}...")
+    def is_politics_query(self, query: str) -> bool:
+        """Проверяет, является ли запрос поиском политических новостей"""
+        politics_keywords = [
+            'политика', 'политические', 'политических', 'политические новости',
+            'политика россии', 'политика в мире', 'новости политики', 'последние новости политики',
+            'политическая ситуация', 'политические события', 'политическое'
+        ]
         
-        if not self.news_client:
-            logger.warning("NewsAPI client not initialized - missing API key")
-            return None
-            
+        query_lower = query.lower()
+        
+        # Проверяем наличие ключевых слов
+        has_politics = any(keyword in query_lower for keyword in politics_keywords)
+        has_news = 'новости' in query_lower or 'новость' in query_lower
+        
+        return has_politics or (has_news and 'политик' in query_lower)
+
+    def extract_numbers_from_query(self, query: str) -> List[int]:
+        """Извлекает числа из запроса для определения количества результатов"""
+        import re
+        numbers = re.findall(r'\b(\d+)\b', query)
+        return [int(num) for num in numbers if int(num) > 0]
+
+    async def search_news(self, query: str) -> Optional[str]:
+        """Поиск новостей с улучшенной обработкой политических запросов"""
+        logger.info(f"Starting news search for: {query[:50]}...")
+        
+        # Инициализируем NewsAPI клиент, если есть ключ
+        newsapi = None
+        if NEWS_API_KEY:
+            newsapi = NewsApiClient(api_key=NEWS_API_KEY)
+            logger.info("NewsAPI initialized: Yes")
+        else:
+            logger.warning("NewsAPI not initialized: No API key")
+
         try:
-            # Извлекаем числа из запроса пользователя
-            requested_numbers = self.extract_numbers_from_query(query)
-            requested_count = max(requested_numbers) if requested_numbers else 10  # По умолчанию 10
+            # Извлекаем необходимое количество новостей из запроса
+            max_news = 10  # По умолчанию
+            numbers = self.extract_numbers_from_query(query)
+            if numbers:
+                # Если пользователь указал количество новостей, используем его значение (с ограничением)
+                max_news = min(max(numbers), 50)  # Максимум 50 новостей
             
-            # Ограничиваем максимальным разумным количеством (для API лимитов)
-            max_possible_articles = min(requested_count, 100)  # Максимум 100 статей
+            # Проверяем, является ли запрос политическим
+            is_politics = self.is_politics_query(query)
             
-            logger.info(f"User requested {requested_count} articles, will try to get up to {max_possible_articles}")
+            # Формируем параметры поиска
+            query_terms = query.lower()
+            language = 'ru'  # По умолчанию русский
             
-            # Интеллектуальная логика поиска для разных типов запросов
-            search_queries = []
-            
-            # Для погодных запросов
-            if self.is_weather_query(query):
-                search_queries = [
-                    'погода россия',
-                    'прогноз погоды',
-                    'климат температура',
-                    'метеопрогноз'
-                ]
-                logger.info("Weather news search queries prepared")
-            # Для политических запросов
-            elif self.is_politics_query(query):
-                search_queries = [
-                    'политика россия',
-                    'правительство россия',
-                    'госдума новости',
-                    'российская политика',
-                    'внутренняя политика',
-                    'кремль политика',
-                    'путин новости',
-                    'министерство россия',
-                    'государственная дума',
-                    'федеральное собрание'
-                ]
-                logger.info(f"Politics news search queries prepared - targeting {max_possible_articles} articles")
-            # Для валютных запросов
-            elif self.is_currency_query(query):
-                search_queries = [
-                    'курс доллара',
-                    'курс евро',
-                    'валютный рынок',
-                    'курс рубля',
-                    'экономика валюта'
-                ]
-                logger.info("Currency news search queries prepared")
-            # Для общих запросов о новостях
-            elif any(word in query.lower() for word in ['новости', 'последние', 'актуальные', 'сегодня', 'происходит']):
-                search_queries = [
-                    'россия новости',
-                    'мировые новости',
-                    'актуальные события',
-                    'российские новости',
-                    'политика экономика'
-                ]
-            # Для экономических запросов
-            elif any(word in query.lower() for word in ['экономика', 'рынок', 'финансы', 'бизнес']):
-                search_queries = [
-                    'экономика россия',
-                    'финансовые рынки',
-                    'бизнес новости'
-                ]
-            else:
-                # Для специфических запросов
-                search_queries = [query]
-            
-            # Вычисляем динамические параметры на основе запрошенного количества
-            articles_per_search = max(3, min(10, max_possible_articles // len(search_queries)))
-            max_articles_per_query = max(5, min(20, max_possible_articles // 2))
-            max_searches = min(10, len(search_queries))  # Максимум 10 поисковых запросов
-            
-            logger.info(f"Search parameters: {articles_per_search} articles per search, {max_articles_per_query} per query, {max_searches} searches")
-            
-            all_articles = []
-            
-            for search_query in search_queries[:max_searches]:
+            # Поиск через NewsAPI
+            news_results = []
+            if newsapi:
                 try:
-                    from_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')  # Более свежие новости
-                    logger.info(f"NewsAPI: Searching '{search_query}' from {from_date}")
+                    # Формируем поисковый запрос
+                    search_query = query_terms
+                    if is_politics:
+                        search_query = 'политика россия'
                     
-                    news = self.news_client.get_everything(
+                    top_headlines = newsapi.get_top_headlines(
                         q=search_query,
-                        language='ru',
-                        sort_by='publishedAt',
-                        page_size=max_articles_per_query,  # Больше статей
-                        from_param=from_date
+                        language=language,
+                        country='ru',
+                        page_size=min(max_news, 20)  # NewsAPI ограничивает до 20
                     )
                     
-                    logger.info(f"NewsAPI '{search_query}': {news.get('totalResults', 0)} results")
-                    
-                    if news['articles']:
-                        for article in news['articles'][:articles_per_search]:
-                            title = article.get('title', '')
-                            description = article.get('description', '')
-                            published = article.get('publishedAt', '')
-                            source = article.get('source', {}).get('name', '')
-                            
-                            # Проверяем, что статья не дублируется
-                            if title and title not in [a.split('📰')[1].split(':')[0].strip() if '📰' in a else a.split(':')[0] for a in all_articles]:
-                                article_text = f"📰 {title}"
-                                if description and len(description) < 200:  # Увеличили лимит описания
-                                    article_text += f": {description}"
-                                if published:
-                                    date = published.split('T')[0]
-                                    article_text += f" ({date})"
-                                if source:
-                                    article_text += f" - {source}"
-                                all_articles.append(article_text)
+                    # Если недостаточно результатов, дополняем поиском
+                    if top_headlines.get('totalResults', 0) < max_news:
+                        everything = newsapi.get_everything(
+                            q=search_query,
+                            language=language,
+                            sort_by='publishedAt',
+                            page_size=max_news
+                        )
+                        
+                        # Объединяем результаты
+                        all_articles = top_headlines.get('articles', []) + everything.get('articles', [])
+                        # Убираем дубликаты
+                        seen_titles = set()
+                        unique_articles = []
+                        for article in all_articles:
+                            if article['title'] not in seen_titles:
+                                seen_titles.add(article['title'])
+                                unique_articles.append(article)
                                 
-                except Exception as search_error:
-                    logger.error(f"NewsAPI search error for '{search_query}': {search_error}")
-                    continue
+                        news_results = unique_articles[:max_news]  # Ограничиваем нужным количеством
+                    else:
+                        news_results = top_headlines.get('articles', [])[:max_news]
+                        
+                    logger.info(f"NewsAPI found {len(news_results)} articles")
+                except Exception as e:
+                    logger.error(f"NewsAPI error: {e}")
             
-            if all_articles:
-                # Возвращаем запрошенное количество статей
-                final_articles = all_articles[:max_possible_articles]
-                logger.info(f"NewsAPI search completed: {len(final_articles)} articles found (requested: {requested_count})")
+            # Если нет результатов из NewsAPI, используем DuckDuckGo
+            if not news_results:
+                logger.info("Using DuckDuckGo as fallback for news")
                 
-                # Формируем заголовок в зависимости от типа запроса
-                if self.is_weather_query(query):
-                    title = f"🌤️ НОВОСТИ О ПОГОДЕ (найдено {len(final_articles)} из {requested_count})"
-                elif self.is_politics_query(query):
-                    title = f"🏛️ ПОЛИТИЧЕСКИЕ НОВОСТИ (найдено {len(final_articles)} из {requested_count})"
-                elif self.is_currency_query(query):
-                    title = f"💰 ФИНАНСОВЫЕ НОВОСТИ (найдено {len(final_articles)} из {requested_count})"
+                search_terms = query_terms
+                if is_politics:
+                    search_terms = "последние политические новости россия"
+                
+                # Поиск через DuckDuckGo
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        response = await session.get(
+                            f"https://html.duckduckgo.com/html/?q={search_terms}+последние+новости", 
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+                            }
+                        )
+                        if response.status == 200:
+                            html = await response.text()
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(html, 'html.parser')
+                            
+                            # Извлекаем результаты поиска
+                            results = soup.find_all('div', {'class': 'result__body'})
+                            
+                            for result in results[:max_news]:  # Ограничиваем количеством
+                                title = result.find('h2')
+                                link = result.find('a', {'class': 'result__a'})
+                                snippet = result.find('a', {'class': 'result__snippet'})
+                                
+                                if title and link and snippet:
+                                    title_text = title.get_text().strip()
+                                    url = link.get('href')
+                                    description = snippet.get_text().strip()
+                                    
+                                    # Формируем временную структуру новости
+                                    news_results.append({
+                                        'title': title_text,
+                                        'url': url,
+                                        'description': description,
+                                        'source': {'name': 'DuckDuckGo Search'}
+                                    })
+                except Exception as e:
+                    logger.error(f"DuckDuckGo search error: {e}")
+            
+            # Формируем результат
+            if news_results:
+                from datetime import datetime
+                import pytz
+                
+                moscow_tz = pytz.timezone('Europe/Moscow')
+                now = datetime.now(moscow_tz)
+                
+                # Заголовок с указанием типа новостей и времени
+                if is_politics:
+                    result = f"🗞️ ПОЛИТИЧЕСКИЕ НОВОСТИ (обновлено {now.strftime('%d.%m.%Y %H:%M')} МСК):\n\n"
                 else:
-                    title = f"📰 АКТУАЛЬНЫЕ НОВОСТИ (найдено {len(final_articles)} из {requested_count})"
+                    result = f"📰 НОВОСТИ ПО ЗАПРОСУ (обновлено {now.strftime('%d.%m.%Y %H:%M')} МСК):\n\n"
                 
-                # Добавляем уведомление, если найдено меньше чем запрошено
-                if len(final_articles) < requested_count:
-                    title += f"\n\n⚠️ Найдено только {len(final_articles)} статей. Увеличьте диапазон дат или измените запрос для получения большего количества."
+                # Формируем список новостей
+                news_items = []
+                for i, article in enumerate(news_results, 1):
+                    title = article.get('title', '').replace('\n', ' ').strip()
+                    # Удаляем ' - Источник' из заголовка
+                    if ' - ' in title:
+                        title = ' - '.join(title.split(' - ')[:-1])
+                    
+                    source = article.get('source', {}).get('name', 'Неизвестный источник')
+                    url = article.get('url', '')
+                    description = article.get('description', '').replace('\n', ' ').strip()
+                    
+                    # Формируем текст новости
+                    news_text = f"{i}. *{title}*\n" + \
+                              f"_{source}_\n" + \
+                              f"{description}\n" + \
+                              f"[Подробнее]({url})"
+                    
+                    news_items.append(news_text)
                 
-                return f"{title}:\n\n" + '\n\n'.join(final_articles)
+                # Объединяем новости в один текст
+                result += "\n\n".join(news_items)
+                
+                # Добавляем информацию о возможности запросить больше новостей
+                result += "\n\n_Вы можете запросить до 50 новостей, указав количество в запросе._"
+                
+                logger.info(f"News search completed: {len(news_items)} articles found")
+                return result
             else:
-                logger.warning(f"NewsAPI: No articles found for any query")
-                return f"❌ К сожалению, по запросу '{query}' новости не найдены. Попробуйте изменить запрос или проверить правописание."
-                
+                logger.warning("No news found")
+                return "⚠️ К сожалению, не удалось найти новости по вашему запросу. Попробуйте изменить запрос или повторить позже."
         except Exception as e:
-            logger.error(f"NewsAPI search error: {e}")
-            logger.error(f"NewsAPI error type: {type(e).__name__}")
-            
-        return None
-    
+            logger.error(f"News search error: {e}")
+            return "⚠️ Произошла ошибка при поиске новостей. Попробуйте повторить запрос позже."
+
     def needs_current_data(self, query: str) -> bool:
         """Определяет, нужны ли актуальные данные для ответа"""
         current_keywords = [
@@ -1518,27 +1555,6 @@ class GeminiBot:
         logger.info(f"Current data search completed: {len(results)} sources found")
         return combined_result
 
-    def is_politics_query(self, query: str) -> bool:
-        """Определяет, является ли запрос политическим"""
-        politics_keywords = [
-            'политик', 'политич', 'правител', 'президент', 'министр', 'госдума', 
-            'государств', 'власт', 'выборы', 'партия', 'депутат', 'федерац',
-            'кремль', 'путин', 'россия политика', 'внутренняя политика', 'внешняя политика',
-            'законопроект', 'закон', 'референдум', 'митинг', 'протест', 'оппозиция',
-            'парламент', 'совет федерации', 'государственная дума', 'правительство',
-            'мэр', 'губернатор', 'администрация', 'санкции', 'дипломатия'
-        ]
-        
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in politics_keywords)
-
-    def extract_numbers_from_query(self, query: str) -> List[int]:
-        """Извлекает числа из запроса пользователя"""
-        import re
-        # Ищем все числа в тексте
-        numbers = re.findall(r'\b(\d+)\b', query)
-        return [int(num) for num in numbers if int(num) > 0]
-    
     def is_weather_query(self, query: str) -> bool:
         """Определяет, является ли запрос о погоде"""
         weather_keywords = [
@@ -1552,7 +1568,7 @@ class GeminiBot:
         return any(keyword in query_lower for keyword in weather_keywords)
 
     async def search_weather_data(self, query: str) -> Optional[str]:
-        """Специальный поиск погодных данных"""
+        """Специальный поиск погодных данных через API погоды"""
         logger.info(f"Starting weather search for: {query[:50]}...")
         
         try:
@@ -1580,42 +1596,123 @@ class GeminiBot:
             
             # Если города не найдены, используем общий поиск
             if not cities:
-                cities = ['россия погода']
+                cities = ['москва']
             
             weather_info = []
             
-            # Поиск погодной информации через DuckDuckGo
+            # Поиск погодной информации через API погоды и веб-парсинг
+            import aiohttp
+            from bs4 import BeautifulSoup
+            
             for city in cities[:3]:  # Максимум 3 города
-                search_query = f"погода {city} сегодня прогноз"
+                # Метод 1: Yandex погода (парсинг)
+                try:
+                    city_encoded = city.replace(' ', '+')
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                        'Connection': 'keep-alive'
+                    }
+                    
+                    # Попытка через realtime погоду
+                    async with aiohttp.ClientSession() as session:
+                        url = f"https://api.realtimeweb.ru/api/getweather?city={city_encoded}"
+                        async with session.get(url, headers=headers) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                if data.get('success'):
+                                    w = data.get('data', {})
+                                    text = f"Температура: {w.get('temperature', 'н/д')}°C, " + \
+                                          f"ощущается как {w.get('feels_like', 'н/д')}°C. " + \
+                                          f"{w.get('description', 'н/д')}. " + \
+                                          f"Влажность: {w.get('humidity', 'н/д')}%, " + \
+                                          f"ветер {w.get('wind_speed', 'н/д')} м/с ({w.get('wind_direction', 'н/д')})."
+                                    weather_info.append(f"🌤️ {city.title()}: {text}")
+                                    continue
+                except Exception as e:
+                    logger.error(f"Weather API error for {city}: {e}")
                 
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        params = {
-                            'q': search_query,
-                            'format': 'json',
-                            'no_html': '1',
-                            'skip_disambig': '1'
-                        }
-                        
-                        async with session.get('https://api.duckduckgo.com/', params=params, timeout=5) as response:
+                # Метод 2: OpenWeather Map с моими переводами
+                try:
+                    city_map = {
+                        'москва': 'Moscow',
+                        'анталия': 'Antalya',
+                        'стамбул': 'Istanbul',
+                        'сочи': 'Sochi',
+                        'санкт-петербург': 'Saint Petersburg',
+                        'екатеринбург': 'Yekaterinburg',
+                        'новосибирск': 'Novosibirsk',
+                        'казань': 'Kazan',
+                        'нижний новгород': 'Nizhny Novgorod',
+                        'красноярск': 'Krasnoyarsk'
+                    }
+                    
+                    city_en = city_map.get(city.lower(), city)
+                    
+                    async with aiohttp.ClientSession() as session:
+                        url = f"https://api.openweathermap.org/data/2.5/weather?q={city_en}&units=metric&lang=ru&appid=12464dd6965b11c90563e796495fc334"
+                        async with session.get(url) as response:
                             if response.status == 200:
                                 data = await response.json()
                                 
-                                # Проверяем различные поля ответа
-                                result_text = ""
-                                if data.get('Abstract'):
-                                    result_text = data['Abstract']
-                                elif data.get('Answer'):
-                                    result_text = data['Answer']
-                                elif data.get('Definition'):
-                                    result_text = data['Definition']
+                                # Перевод описаний
+                                wind_dir = ""
+                                deg = data.get('wind', {}).get('deg', 0)
+                                if deg > 337.5 or deg <= 22.5: wind_dir = "северный"
+                                elif deg <= 67.5: wind_dir = "северо-восточный"
+                                elif deg <= 112.5: wind_dir = "восточный"
+                                elif deg <= 157.5: wind_dir = "юго-восточный"
+                                elif deg <= 202.5: wind_dir = "южный"
+                                elif deg <= 247.5: wind_dir = "юго-западный"
+                                elif deg <= 292.5: wind_dir = "западный"
+                                else: wind_dir = "северо-западный"
                                 
-                                if result_text and len(result_text) > 50:
-                                    weather_info.append(f"🌤️ {city.title()}: {result_text}")
-                                    
-                    except Exception as search_error:
-                        logger.error(f"Weather search error for {city}: {search_error}")
-                        continue
+                                temp = data.get('main', {}).get('temp', 'н/д')
+                                feels_like = data.get('main', {}).get('feels_like', 'н/д')
+                                description = data.get('weather', [{}])[0].get('description', 'н/д')
+                                humidity = data.get('main', {}).get('humidity', 'н/д')
+                                wind_speed = data.get('wind', {}).get('speed', 'н/д')
+                                pressure = data.get('main', {}).get('pressure', 'н/д')
+                                
+                                text = f"Температура: {temp}°C, " + \
+                                      f"ощущается как {feels_like}°C. " + \
+                                      f"{description.capitalize()}. " + \
+                                      f"Влажность: {humidity}%, " + \
+                                      f"давление: {int(pressure * 0.75)} мм рт.ст., " + \
+                                      f"ветер {wind_speed} м/с ({wind_dir})."
+                                      
+                                weather_info.append(f"🌤️ {city.title()}: {text}")
+                                continue
+                except Exception as e:
+                    logger.error(f"OpenWeather API error for {city}: {e}")
+                
+                # Метод 3: Fallback - DuckDuckGo
+                try:
+                    search_query = f"погода {city} сегодня прогноз"
+                    async with aiohttp.ClientSession() as session:
+                        response = await session.get(
+                            f"https://html.duckduckgo.com/html/?q={search_query}", 
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+                            }
+                        )
+                        if response.status == 200:
+                            html = await response.text()
+                            soup = BeautifulSoup(html, 'html.parser')
+                            
+                            # Извлекаем результаты поиска
+                            results = soup.find_all('div', {'class': 'result__body'})
+                            for result in results[:2]:
+                                title = result.find('h2')
+                                snippet = result.find('a', {'class': 'result__snippet'})
+                                
+                                if title and snippet and "погода" in snippet.text.lower() and len(snippet.text) > 50:
+                                    # Здесь создаем собственный прогноз из результатов поиска
+                                    weather_info.append(f"🌤️ {city.title()}: {snippet.text.strip()}")
+                                    break
+                except Exception as e:
+                    logger.error(f"DuckDuckGo weather search error for {city}: {e}")
             
             if weather_info:
                 from datetime import datetime
@@ -1629,12 +1726,12 @@ class GeminiBot:
                 logger.info(f"Weather search completed: {len(weather_info)} forecasts found")
                 return result
             else:
-                logger.warning("No weather data found")
-                return None
+                logger.warning("No weather data found, returning generic message")
+                return "⚠️ К сожалению, не удалось получить актуальный прогноз погоды. Попробуйте уточнить название города или повторить запрос позже."
                 
         except Exception as e:
             logger.error(f"Weather search error: {e}")
-            return None
+            return "⚠️ Произошла ошибка при получении прогноза погоды. Попробуйте повторить запрос позже."
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
