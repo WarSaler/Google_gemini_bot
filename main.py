@@ -634,8 +634,8 @@ class GeminiBot:
             # Fallback к gTTS так как Yandex требует API ключ
             logger.info("Yandex SpeechKit requires API key, falling back to enhanced gTTS")
             
-            # Используем gTTS с оптимизированными настройками для лучшего качества
-            return await self._gtts_synthesize(text, language, slow=True)  # Медленная речь для лучшего качества
+            # Используем gTTS с БЫСТРЫМИ настройками
+            return await self._gtts_synthesize(text, language, slow=False)  # БЫСТРАЯ речь для скорости
             
         except Exception as e:
             logger.error(f"Error in Yandex synthesis: {e}")
@@ -737,43 +737,48 @@ class GeminiBot:
                 logger.error(f"Piper version check error: {e}")
                 return None
             
-            # Ограничиваем длину текста для ускорения синтеза
-            if len(text) > 500:
-                text = text[:500] + "..."
-                logger.info(f"Text truncated to 500 characters for faster synthesis")
+            # ЖЕСТКОЕ ограничение длины текста для быстрого синтеза
+            if len(text) > 200:
+                text = text[:200] + "..."
+                logger.info(f"Text truncated to 200 characters for FAST synthesis")
             
-            # Создание временного файла для вывода
+            # Создание временного файла для текста и вывода
+            with tempfile.NamedTemporaryFile(mode='w', suffix=".txt", delete=False, encoding='utf-8') as text_file:
+                text_file.write(text)
+                text_filename = text_file.name
+            
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
                 temp_filename = temp_file.name
             
             logger.info(f"Running Piper TTS with model: {model_path}")
             
-            # Команда для piper с оптимизированными настройками
+            # Команда для piper с АГРЕССИВНЫМИ настройками скорости
             cmd = [
                 piper_executable,
                 "--model", model_path,
                 "--output_file", temp_filename,
-                "--length_scale", "1.1",  # Немного быстрее речь
-                "--noise_scale", "0.667",  # Меньше шума
-                "--noise_w", "0.8"  # Оптимизированное качество
+                "--length_scale", "0.8",  # БЫСТРАЯ речь
+                "--noise_scale", "0.1",   # МИНИМУМ шума для скорости
+                "--noise_w", "0.1",       # МИНИМУМ для скорости
+                "--sentence_silence", "0.2",  # Короткие паузы
+                "--text_file", text_filename  # Читаем из файла, НЕ stdin
             ]
             
             logger.info(f"Running command: {' '.join(cmd)}")
             logger.info(f"Text to synthesize: {text[:50]}... (total: {len(text)} chars)")
             
-            # Запуск команды с timeout
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            # Отправляем текст на stdin и ждем результат с timeout
+            # Запуск команды с КОРОТКИМ timeout
             try:
-                stdout, stderr = process.communicate(input=text, timeout=30)  # 30 секунд timeout
-                return_code = process.returncode
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10  # КОРОТКИЙ timeout: 10 секунд
+                )
+                
+                return_code = result.returncode
+                stdout = result.stdout
+                stderr = result.stderr
                 
                 logger.info(f"Piper process completed with return code: {return_code}")
                 if stdout:
@@ -783,35 +788,43 @@ class GeminiBot:
                 
                 if return_code != 0:
                     logger.error(f"Piper failed with return code {return_code}")
+                    # Очистка временных файлов
                     if os.path.exists(temp_filename):
                         os.unlink(temp_filename)
+                    if os.path.exists(text_filename):
+                        os.unlink(text_filename)
                     return None
                 
                 # Проверяем, создался ли файл
                 if not os.path.exists(temp_filename):
                     logger.error("Piper output file was not created")
+                    # Очистка временных файлов
+                    if os.path.exists(text_filename):
+                        os.unlink(text_filename)
                     return None
                 
                 # Читаем результат
                 with open(temp_filename, 'rb') as f:
                     audio_data = f.read()
                 
-                # Удаляем временный файл
+                # Удаляем временные файлы
                 os.unlink(temp_filename)
+                os.unlink(text_filename)
                 
                 if len(audio_data) > 0:
-                    logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio")
+                    logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio in 10s")
                     return audio_data
                 else:
                     logger.error("Generated audio file is empty")
                     return None
                     
             except subprocess.TimeoutExpired:
-                logger.error("Piper TTS timeout after 30 seconds")
-                process.kill()
-                process.wait()
+                logger.error("Piper TTS timeout after 10 seconds - using fallback")
+                # Очистка временных файлов
                 if os.path.exists(temp_filename):
                     os.unlink(temp_filename)
+                if os.path.exists(text_filename):
+                    os.unlink(text_filename)
                 return None
                 
         except Exception as e:
