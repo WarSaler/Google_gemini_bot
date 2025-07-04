@@ -992,33 +992,72 @@ def setup_piper_if_needed():
     """Устанавливает Piper TTS если не установлен"""
     global PIPER_AVAILABLE
     
+    # Проверяем доступность piper через pip
+    piper_installed = False
     try:
-        # Проверяем доступность piper через pip
         import piper.voice
         logger.info("Piper TTS already available")
+        piper_installed = True
         PIPER_AVAILABLE = True
-        return True
     except ImportError:
-        logger.info("Piper TTS not found, installing...")
+        logger.info("Piper TTS not found, will install...")
+        PIPER_AVAILABLE = False
+    
+    # Проверяем наличие голосовых моделей
+    voices_dir = "/app/piper_tts/voices"
+    models_exist = False
+    
+    if os.path.exists(voices_dir):
+        onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
+        if len(onnx_files) >= 4:  # Ожидаем 4 голосовые модели
+            models_exist = True
+            logger.info(f"Found {len(onnx_files)} voice models")
+        else:
+            logger.info(f"Found only {len(onnx_files)} voice models, need to download more")
+    else:
+        logger.info("Voices directory not found, will create and download models")
+    
+    # Запускаем установочный скрипт если нужно установить Piper или скачать модели
+    if not piper_installed or not models_exist:
+        logger.info("Running Piper TTS installation script...")
         result = subprocess.run(['bash', 'install_piper.sh'], 
                               capture_output=True, text=True, cwd='/app')
         
         if result.returncode == 0:
-            logger.info("Piper TTS installation successful")
+            logger.info("Piper TTS installation script completed successfully")
             logger.info(f"Installation stdout: {result.stdout}")
-            try:
-                import piper.voice
-                PIPER_AVAILABLE = True
-                return True
-            except ImportError:
-                logger.error("Piper TTS import failed after installation")
-                PIPER_AVAILABLE = False
+            
+            # Проверяем установку Piper если он не был установлен
+            if not piper_installed:
+                try:
+                    import piper.voice
+                    PIPER_AVAILABLE = True
+                    logger.info("Piper TTS installed and imported successfully")
+                except ImportError:
+                    logger.error("Piper TTS import failed after installation")
+                    PIPER_AVAILABLE = False
+                    return False
+            
+            # Проверяем наличие голосовых моделей
+            if os.path.exists(voices_dir):
+                onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
+                logger.info(f"Voice models after installation: {len(onnx_files)} found")
+                if len(onnx_files) > 0:
+                    logger.info(f"Available models: {onnx_files}")
+                    return True
+                else:
+                    logger.warning("No voice models found after installation")
+                    return False
+            else:
+                logger.error("Voices directory still not found after installation")
                 return False
         else:
             logger.error(f"Piper TTS installation failed: {result.stderr}")
             logger.error(f"Installation stdout: {result.stdout}")
             PIPER_AVAILABLE = False
             return False
+    
+    return True
 
 def _piper_synthesize(text, voice_model=None):
     """Синтез речи с помощью Piper TTS (pip version)"""
