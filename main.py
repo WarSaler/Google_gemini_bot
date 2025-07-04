@@ -659,9 +659,10 @@ class GeminiBot:
             gender = 'Male' if voice in male_voices else 'Female'
             logger.info(f"Using Azure voice {voice} with gender {gender}")
             
-            # Создаем SSML для Azure Speech с правильным форматированием
-            # Используем более простой и стандартный формат SSML без лишних атрибутов
-            ssml = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>'
+            # Создаем стандартный SSML для Azure Speech
+            # ВАЖНО: Используем строгий формат SSML без лишних атрибутов и с правильными пространствами имен
+            # Для корректной работы всех голосов (Дмитрий, Артём, Светлана, Дарья, Полина)
+            ssml = f'<speak xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" version="1.0" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>'
             
             headers = {
                 'Ocp-Apim-Subscription-Key': azure_api_key,
