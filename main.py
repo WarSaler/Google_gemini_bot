@@ -660,8 +660,8 @@ class GeminiBot:
             logger.info(f"Using Azure voice {voice} with gender {gender}")
             
             # Создаем SSML для Azure Speech с правильным форматированием
-            # Важно: убираем лишние пробелы и переносы строк внутри XML
-            ssml = f"""<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>"""
+            # Используем более простой и стандартный формат SSML без лишних атрибутов
+            ssml = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>'
             
             headers = {
                 'Ocp-Apim-Subscription-Key': azure_api_key,
