@@ -662,7 +662,8 @@ class GeminiBot:
             # Создаем стандартный SSML для Azure Speech
             # ВАЖНО: Используем строгий формат SSML без лишних атрибутов и с правильными пространствами имен
             # Для корректной работы всех голосов (Дмитрий, Артём, Светлана, Дарья, Полина)
-            ssml = f'<speak xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" version="1.0" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>'
+            # Используем строгий формат без лишних пробелов и переносов строк
+            ssml = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>'
             
             headers = {
                 'Ocp-Apim-Subscription-Key': azure_api_key,
