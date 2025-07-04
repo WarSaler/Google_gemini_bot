@@ -666,11 +666,7 @@ class GeminiBot:
             seen = set()
             working_models = [x for x in working_models if not (x in seen or seen.add(x))]
             
-            # Обновленные пути для новой структуры (используем абсолютные пути)
-            model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
-            config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
-            
-            # Ищем первую рабочую модель из списка (включая запрошенную)
+            # Ищем первую рабочую модель из списка
             voices_dir = "/app/piper_tts/voices"
             final_voice_model = None
             final_model_path = None
@@ -700,89 +696,82 @@ class GeminiBot:
             voice_model = final_voice_model
             model_path = final_model_path
             
-            # Проверяем наличие исполняемого файла piper в новых путях
-            piper_executable = None
-            possible_paths = [
-                "/app/piper_tts/bin/piper/piper",  # Новая структура - абсолютный путь
-                "piper_tts/bin/piper/piper",  # Новая структура - относительный путь
-                "/usr/local/bin/piper",
-                "/usr/bin/piper", 
-                "/app/piper",
-                "piper"
-            ]
-            
-            for path in possible_paths:
-                if os.path.exists(path) and os.access(path, os.X_OK):
-                    piper_executable = path
-                    logger.info(f"Found piper executable at: {path}")
-                    break
-            
-            if not piper_executable:
-                logger.error("Piper executable not found")
+            # Проверяем наличие исполняемого файла piper
+            piper_executable = "/app/piper_tts/bin/piper/piper"
+            if not os.path.exists(piper_executable) or not os.access(piper_executable, os.X_OK):
+                logger.error(f"Piper executable not found at: {piper_executable}")
                 return None
             
-            # Проверка работоспособности
+            logger.info(f"Found piper executable at: {piper_executable}")
+            
+            # Быстрая проверка работоспособности
             try:
                 check_result = subprocess.run([piper_executable, "--version"], 
-                                            capture_output=True, text=True, timeout=5)
+                                            capture_output=True, text=True, timeout=3)
                 if check_result.returncode == 0:
                     logger.info(f"Piper version: {check_result.stdout.strip()}")
                 else:
-                    logger.error(f"Piper version check failed: {check_result.stderr}")
+                    logger.error(f"Piper version check failed")
                     return None
-            except subprocess.TimeoutExpired:
-                logger.error("Piper version check timeout")
-                return None
             except Exception as e:
                 logger.error(f"Piper version check error: {e}")
                 return None
             
-            # ЖЕСТКОЕ ограничение длины текста для быстрого синтеза
-            if len(text) > 200:
-                text = text[:200] + "..."
-                logger.info(f"Text truncated to 200 characters for FAST synthesis")
+            # СИЛЬНОЕ ограничение длины текста для СУПЕР-БЫСТРОГО синтеза
+            max_chars = 100  # ОЧЕНЬ короткий текст
+            if len(text) > max_chars:
+                text = text[:max_chars] + "..."
+                logger.info(f"Text truncated to {max_chars} characters for SUPER-FAST synthesis")
             
-            # Очистка текста от проблемных символов
+            # Очистка и подготовка текста
             clean_text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
             clean_text = ' '.join(clean_text.split())  # Убираем множественные пробелы
+            clean_text = clean_text.strip()
             
-            # Создание временного файла для вывода
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_filename = temp_file.name
+            if not clean_text:
+                logger.error("Empty text after cleaning")
+                return None
             
-            logger.info(f"Running Piper TTS with model: {model_path}")
-            logger.info(f"Clean text to synthesize: '{clean_text}' (length: {len(clean_text)})")
+            logger.info(f"Final text for synthesis: '{clean_text}' (length: {len(clean_text)})")
             
-            # ВАРИАНТ 1: Попробуем передачу через stdin (более надежно)
-            cmd = [
-                piper_executable,
-                "--model", model_path,
-                "--output_file", temp_filename,
-                "--length_scale", "0.8",  # БЫСТРАЯ речь
-                "--noise_scale", "0.1",   # МИНИМУМ шума для скорости
-                "--noise_w", "0.1",       # МИНИМУМ для скорости
-                "--sentence_silence", "0.2"  # Короткие паузы
-                # НЕ используем --text_file, передаем через stdin
-            ]
+            # Создаем временные файлы
+            text_fd, text_filename = tempfile.mkstemp(suffix=".txt", text=True)
+            wav_fd, wav_filename = tempfile.mkstemp(suffix=".wav")
             
-            logger.info(f"Running command via STDIN: {' '.join(cmd)}")
-            
-            # Запуск команды с передачей текста через stdin
             try:
+                # Записываем текст в файл с явной UTF-8 кодировкой
+                with os.fdopen(text_fd, 'w', encoding='utf-8') as f:
+                    f.write(clean_text)
+                    f.write('\n')  # Добавляем перенос строки в конце
+                os.close(wav_fd)  # Закрываем дескриптор, файл используется piper
+                
+                logger.info(f"Text file created: {text_filename}")
+                logger.info(f"Output file will be: {wav_filename}")
+                
+                # УПРОЩЕННАЯ команда с минимальными параметрами
+                cmd = [
+                    piper_executable,
+                    "--model", model_path,
+                    "--output_file", wav_filename,
+                    "--text_file", text_filename
+                    # Убираем ВСЕ дополнительные параметры для стабильности
+                ]
+                
+                logger.info(f"Running simplified command: {' '.join(cmd)}")
+                
+                # Запуск с КОРОТКИМ timeout
                 result = subprocess.run(
                     cmd,
-                    input=clean_text,  # Передаем текст через stdin
                     capture_output=True,
                     text=True,
-                    encoding='utf-8',
-                    timeout=15  # Увеличиваем timeout до 15 секунд
+                    timeout=8  # Очень короткий timeout: 8 секунд
                 )
                 
                 return_code = result.returncode
                 stdout = result.stdout
                 stderr = result.stderr
                 
-                logger.info(f"Piper process completed with return code: {return_code}")
+                logger.info(f"Piper completed with return code: {return_code}")
                 if stdout:
                     logger.info(f"Piper stdout: {stdout}")
                 if stderr:
@@ -790,47 +779,43 @@ class GeminiBot:
                 
                 if return_code != 0:
                     logger.error(f"Piper failed with return code {return_code}")
-                    logger.error(f"Piper stderr: {stderr}")
-                    # Очистка временных файлов
-                    if os.path.exists(temp_filename):
-                        os.unlink(temp_filename)
                     return None
                 
-                # Проверяем, создался ли файл и его размер
-                if not os.path.exists(temp_filename):
+                # Проверяем результат
+                if not os.path.exists(wav_filename):
                     logger.error("Piper output file was not created")
                     return None
                 
-                # Получаем размер файла перед чтением
-                file_size = os.path.getsize(temp_filename)
+                file_size = os.path.getsize(wav_filename)
                 logger.info(f"Generated audio file size: {file_size} bytes")
                 
                 if file_size == 0:
                     logger.error("Generated audio file is empty (0 bytes)")
-                    os.unlink(temp_filename)
                     return None
                 
-                # Читаем результат
-                with open(temp_filename, 'rb') as f:
+                # Читаем аудио данные
+                with open(wav_filename, 'rb') as f:
                     audio_data = f.read()
                 
-                # Удаляем временный файл
-                os.unlink(temp_filename)
-                
                 if len(audio_data) > 0:
-                    logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio")
+                    logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio in 8s")
                     return audio_data
                 else:
                     logger.error("Audio data is empty after reading file")
                     return None
                     
-            except subprocess.TimeoutExpired:
-                logger.error("Piper TTS timeout after 15 seconds - using fallback")
-                # Очистка временных файлов
-                if os.path.exists(temp_filename):
-                    os.unlink(temp_filename)
-                return None
-                
+            finally:
+                # Обязательная очистка временных файлов
+                for filepath in [text_filename, wav_filename]:
+                    if os.path.exists(filepath):
+                        try:
+                            os.unlink(filepath)
+                        except Exception as e:
+                            logger.warning(f"Failed to delete temp file {filepath}: {e}")
+                            
+        except subprocess.TimeoutExpired:
+            logger.error("Piper TTS timeout after 8 seconds - process killed")
+            return None
         except Exception as e:
             logger.error(f"Error in Piper TTS synthesis: {e}")
             import traceback
