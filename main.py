@@ -3,13 +3,25 @@ import logging
 import asyncio
 import base64
 import re
+import tempfile
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import Dict, List, Optional
+from io import BytesIO
 import aiohttp
 from aiohttp import web
 from newsapi import NewsApiClient
 from bs4 import BeautifulSoup
+
+# Импорты для голосовых функций
+try:
+    from gtts import gTTS
+    from pydub import AudioSegment
+    import speech_recognition as sr
+    VOICE_FEATURES_AVAILABLE = True
+except ImportError:
+    VOICE_FEATURES_AVAILABLE = False
+    logging.warning("Voice features not available - missing dependencies")
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -35,6 +47,7 @@ DAILY_LIMIT = 250
 # Хранилище данных
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
 request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
+voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
 
 # Глобальная переменная для приложения
 telegram_app = None
@@ -65,20 +78,26 @@ class GeminiBot:
         
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /help"""
-        help_message = """📋 Справка по командам:
+        user_id = update.effective_user.id
+        voice_status = "включены" if voice_settings[user_id] else "отключены"
+        voice_features_status = "✅ доступны" if VOICE_FEATURES_AVAILABLE else "❌ недоступны"
+        
+        help_message = f"""📋 Справка по командам:
 
 /start - Приветствие
 /help - Показать эту справку
 /clear - Очистить историю переписки
 /limits - Показать лимиты запросов
+/voice - Включить/отключить голосовые ответы
 
 🔄 Как пользоваться:
 • 💬 Отправьте текстовое сообщение для получения ответа
+• 🎤 Отправьте голосовое сообщение - я распознаю речь и отвечу голосом
 • 🖼️ Отправьте изображение для анализа
 • 📰 Бот автоматически ищет актуальную информацию при необходимости
 
-❌ Не поддерживается:
-• 🎤 Голосовые сообщения (пока не реализовано)
+🎵 Голосовые функции: {voice_features_status}
+Голосовые ответы: {voice_status}
 
 ⚡ Лимиты: 10 запросов в минуту, 250 в день"""
         
@@ -101,6 +120,37 @@ class GeminiBot:
 📅 Сегодня: {remaining_day}/{DAILY_LIMIT}"""
         
         await update.message.reply_text(limits_message)
+
+    async def voice_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /voice - переключение голосовых ответов"""
+        user_id = update.effective_user.id
+        voice_settings[user_id] = not voice_settings[user_id]
+        
+        if voice_settings[user_id]:
+            status_message = "🎵 Голосовые ответы включены!\n\nТеперь бот будет отвечать голосом на ваши голосовые сообщения."
+        else:
+            status_message = "📝 Голосовые ответы отключены.\n\nБот будет отвечать только текстом."
+            
+        await update.message.reply_text(status_message)
+
+    def clean_text_for_speech(self, text: str) -> str:
+        """Очистка текста для синтеза речи"""
+        # Удаляем markdown символы
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Убираем жирный текст
+        text = re.sub(r'\*(.*?)\*', r'\1', text)      # Убираем курсив
+        text = re.sub(r'`(.*?)`', r'\1', text)        # Убираем код
+        text = re.sub(r'#{1,6}\s*', '', text)         # Убираем заголовки
+        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)  # Убираем ссылки
+        text = re.sub(r'[_~]', '', text)              # Убираем подчеркивания и зачеркивания
+        
+        # Убираем эмодзи для лучшего озвучивания
+        text = re.sub(r'[🎤🎵📝💬🖼️📰💰⚡❌✅🔍💭📊💡🔄]', '', text)
+        
+        # Убираем множественные пробелы и переносы
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        
+        return text
 
     def clean_old_requests(self, user_id: int):
         """Очистка старых запросов"""
@@ -184,6 +234,107 @@ class GeminiBot:
                         
         except Exception as e:
             logger.error(f"Error calling Gemini API: {e}")
+            return None
+
+    async def speech_to_text(self, audio_bytes: bytes) -> Optional[str]:
+        """Конвертация аудио в текст"""
+        if not VOICE_FEATURES_AVAILABLE:
+            return None
+            
+        try:
+            # Создаем временные файлы
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as ogg_file:
+                ogg_file.write(audio_bytes)
+                ogg_path = ogg_file.name
+            
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_file:
+                wav_path = wav_file.name
+            
+            try:
+                # Конвертация OGG в WAV с помощью pydub
+                logger.debug("Converting OGG to WAV...")
+                audio = AudioSegment.from_ogg(ogg_path)
+                audio = audio.set_frame_rate(16000).set_channels(1)  # Оптимизация для распознавания
+                audio.export(wav_path, format="wav")
+                
+                # Распознавание речи
+                logger.debug("Recognizing speech...")
+                recognizer = sr.Recognizer()
+                
+                with sr.AudioFile(wav_path) as source:
+                    audio_data = recognizer.record(source)
+                
+                # Пробуем сначала русский, потом английский
+                try:
+                    text = recognizer.recognize_google(audio_data, language="ru-RU")
+                    logger.info(f"Speech recognized (Russian): {len(text)} characters")
+                    return text
+                except sr.UnknownValueError:
+                    # Если русский не сработал, пробуем английский
+                    try:
+                        text = recognizer.recognize_google(audio_data, language="en-US")
+                        logger.info(f"Speech recognized (English): {len(text)} characters")
+                        return text
+                    except sr.UnknownValueError:
+                        logger.warning("Could not understand audio in both Russian and English")
+                        return None
+                        
+            finally:
+                # Очистка временных файлов
+                try:
+                    os.unlink(ogg_path)
+                    os.unlink(wav_path)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"Error in speech recognition: {e}")
+            return None
+
+    async def text_to_speech(self, text: str, language: str = "ru") -> Optional[bytes]:
+        """Синтез речи из текста с помощью gTTS"""
+        if not VOICE_FEATURES_AVAILABLE:
+            return None
+            
+        try:
+            # Проверка на минимальную длину текста
+            if not text or len(text.strip()) < 3:
+                logger.warning("Text too short for TTS")
+                return None
+                
+            # Ограничение длины текста (gTTS имеет лимиты)
+            if len(text) > 1000:
+                text = text[:1000] + "..."
+            
+            logger.debug(f"Converting text to speech: {len(text)} characters")
+            
+            # Создание временного файла для аудио
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                # Создание TTS объекта
+                tts = gTTS(text=text, lang=language, slow=False)
+                
+                # Сохранение в временный файл
+                tts.save(temp_path)
+                
+                # Чтение байтов из файла
+                with open(temp_path, 'rb') as audio_file:
+                    audio_bytes = audio_file.read()
+                
+                logger.info(f"Text-to-speech success: generated {len(audio_bytes)} bytes")
+                return audio_bytes
+                
+            finally:
+                # Очистка временного файла
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"Error in text-to-speech: {e}")
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -476,63 +627,127 @@ class GeminiBot:
 
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка голосовых сообщений"""
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        user_id = update.effective_user.id
+        logger.info(f"Received voice message from user {user_id}")
         
-        user_id = update.message.from_user.id
-        
-        if not self.can_make_request(user_id):
-            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+        if not VOICE_FEATURES_AVAILABLE:
             await update.message.reply_text(
-                f"⚠️ Превышен лимит запросов.\n"
-                f"🕐 Осталось в минуте: {remaining_minute}\n"
-                f"📅 Осталось сегодня: {remaining_day}"
+                "🎤 Извините, голосовые функции недоступны.\n\n"
+                "Сервер не поддерживает обработку голосовых сообщений.\n"
+                "Пожалуйста, отправьте ваш вопрос текстом."
             )
             return
-            
-        self.add_request(user_id)
         
         try:
-            # Получаем голосовое сообщение
-            voice = update.message.voice
-            file = await context.bot.get_file(voice.file_id)
+            # Проверка лимитов
+            if not self.can_make_request(user_id):
+                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+                await update.message.reply_text(
+                    f"❌ Превышен лимит запросов!\n\n"
+                    f"Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в этой минуте, {remaining_day}/{DAILY_LIMIT} сегодня."
+                )
+                return
+
+            # Отправка индикатора печати
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            logger.info(f"Sent typing indicator for voice processing from user {user_id}")
             
-            # Скачиваем аудио файл
-            async with aiohttp.ClientSession() as session:
-                async with session.get(file.file_path) as response:
-                    if response.status == 200:
-                        audio_data = await response.read()
-                        
-                        # Кодируем в base64
-                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                        
-                        # Отправляем в Gemini для обработки
-                        headers = {'Content-Type': 'application/json'}
-                        data = {
-                            "contents": [
-                                {
-                                    "parts": [
-                                        {"text": "Пользователь отправил голосовое сообщение. К сожалению, я не могу обрабатывать аудио напрямую. Попросите пользователя отправить текстовое сообщение или изображение."},
-                                    ]
-                                }
-                            ]
-                        }
-                        
-                        # Простой ответ без обработки аудио
-                        response = "🎤 Извините, я пока не могу обрабатывать голосовые сообщения.\n\n" \
-                                 "Пожалуйста, отправьте ваш вопрос текстом или изображением.\n\n" \
-                                 "Доступные форматы:\n" \
-                                 "• 💬 Текстовые сообщения\n" \
-                                 "• 🖼️ Изображения для анализа\n" \
-                                 "• 📰 Поиск новостей\n" \
-                                 "• 💰 Курсы валют"
-                        
-                        await self.safe_send_message(update, response)
+            # Получение голосового файла
+            voice_file = await update.message.voice.get_file()
+            voice_bytes = await voice_file.download_as_bytearray()
+            
+            logger.info(f"Downloaded voice message: {len(voice_bytes)} bytes")
+            
+            # Распознавание речи
+            await update.message.reply_text("🎤 Распознаю речь...")
+            transcribed_text = await self.speech_to_text(bytes(voice_bytes))
+            
+            if not transcribed_text:
+                await update.message.reply_text("❌ Не удалось распознать речь. Попробуйте еще раз или говорите четче.")
+                return
+            
+            logger.info(f"Voice transcribed for user {user_id}: {transcribed_text[:100]}...")
+            
+            # Отправка уведомления о том, что речь распознана
+            await update.message.reply_text(f"✅ Распознано: \"{transcribed_text}\"")
+            
+            # Проверяем, нужны ли актуальные данные
+            if self.needs_current_data(transcribed_text):
+                await update.message.reply_text("🔍 Ищу актуальную информацию в интернете...")
+                current_info = await self.get_current_data(transcribed_text)
+                
+                if current_info:
+                    # Формируем расширенный запрос с актуальными данными
+                    enhanced_message = f"""ВАЖНАЯ ИНФОРМАЦИЯ: Сегодня {datetime.now().strftime('%d.%m.%Y')} год.
+
+Голосовой вопрос пользователя: {transcribed_text}
+
+АКТУАЛЬНАЯ ИНФОРМАЦИЯ ИЗ ИНТЕРНЕТА:
+{current_info}
+
+Используй актуальную информацию выше для ответа. Отвечай кратко и по существу на русском языке."""
+                    
+                    messages = [{"role": "user", "content": enhanced_message}]
+                else:
+                    messages = [{"role": "user", "content": transcribed_text}]
+            else:
+                messages = [{"role": "user", "content": transcribed_text}]
+
+            # Уведомление о начале обработки
+            await update.message.reply_text("💭 Думаю над ответом...")
+            
+            logger.info(f"Calling Gemini API for voice message from user {user_id}")
+            response = await self.call_gemini_api(messages)
+            
+            if response:
+                logger.info(f"Received response from Gemini API for voice message from user {user_id}: {len(response)} characters")
+                
+                # Добавление запроса в счетчик
+                self.add_request(user_id)
+                
+                # Получение оставшихся запросов
+                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+                
+                # Проверка настроек голосовых ответов пользователя
+                if voice_settings[user_id]:
+                    # Генерация голосового ответа
+                    await update.message.reply_text("🎵 Генерирую голосовой ответ...")
+                    
+                    # Очистка текста от markdown символов для лучшего озвучивания
+                    clean_response = self.clean_text_for_speech(response)
+                    
+                    # Определение языка для TTS (русский если в тексте есть кириллица, иначе английский)
+                    tts_language = "ru" if any('\u0400' <= char <= '\u04FF' for char in clean_response) else "en"
+                    
+                    # Синтез речи
+                    voice_bytes = await self.text_to_speech(clean_response, tts_language)
+                    
+                    if voice_bytes:
+                        try:
+                            # Отправка голосового сообщения
+                            await update.message.reply_voice(
+                                voice=BytesIO(voice_bytes),
+                                caption=f"🎤➡️🎵 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня\n\n💡 Отключить голосовые ответы: /voice"
+                            )
+                            logger.info(f"Successfully sent voice response to user {user_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to send voice message to user {user_id}: {e}")
+                            # Fallback к текстовому ответу
+                            await update.message.reply_text(f"❌ Не удалось отправить голосовой ответ, вот текст:\n\n{response}")
                     else:
-                        await update.message.reply_text("Не удалось скачать голосовое сообщение.")
-                        
+                        logger.error(f"Voice synthesis failed for user {user_id}")
+                        # Fallback к текстовому ответу
+                        await update.message.reply_text(f"❌ Не удалось создать голосовой ответ, вот текст:\n\n{response}")
+                else:
+                    # Текстовый ответ если голосовые отключены
+                    await update.message.reply_text(f"📝 {response}\n\n💡 Включить голосовые ответы: /voice")
+            else:
+                logger.error(f"No response received from Gemini API for voice message from user {user_id}")
+                await update.message.reply_text("❌ Произошла ошибка при обращении к AI. Попробуйте позже.")
+                
         except Exception as e:
-            logger.error(f"Error processing voice: {e}")
-            await update.message.reply_text("Произошла ошибка при обработке голосового сообщения.")
+            logger.error(f"Error handling voice message from user {user_id}: {e}")
+            await update.message.reply_text("❌ Произошла ошибка при обработке голосового сообщения.")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
@@ -606,6 +821,7 @@ async def main():
     telegram_app.add_handler(CommandHandler("help", bot.help_command))
     telegram_app.add_handler(CommandHandler("clear", bot.clear_command))
     telegram_app.add_handler(CommandHandler("limits", bot.limits_command))
+    telegram_app.add_handler(CommandHandler("voice", bot.voice_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
     telegram_app.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
