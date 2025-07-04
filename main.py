@@ -18,10 +18,22 @@ try:
     from gtts import gTTS
     from pydub import AudioSegment
     import speech_recognition as sr
+    
+    # Пытаемся импортировать Piper TTS
+    try:
+        import piper
+        PIPER_AVAILABLE = True
+        logger.info("Piper TTS available")
+    except ImportError:
+        PIPER_AVAILABLE = False
+        logger.warning("Piper TTS not available")
+    
     VOICE_FEATURES_AVAILABLE = True
-except ImportError:
+    logger.info("Voice features available")
+except ImportError as e:
     VOICE_FEATURES_AVAILABLE = False
-    logging.warning("Voice features not available - missing dependencies")
+    PIPER_AVAILABLE = False
+    logging.warning(f"Voice features not available: {e}")
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -48,6 +60,26 @@ DAILY_LIMIT = 250
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
 request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
 voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
+voice_engine_settings: Dict[int, str] = defaultdict(lambda: "gtts")  # По умолчанию gTTS
+
+# Доступные голосовые движки
+VOICE_ENGINES = {
+    "gtts": {
+        "name": "Google TTS",
+        "description": "Стандартный голос Google (женский)",
+        "available": VOICE_FEATURES_AVAILABLE
+    },
+    "gtts_slow": {
+        "name": "Google TTS (медленный)",
+        "description": "Более медленная речь Google (женский)",
+        "available": VOICE_FEATURES_AVAILABLE
+    },
+    "piper": {
+        "name": "Piper TTS (высокое качество)",
+        "description": "Улучшенный нейросетевой голос (мужской/женский)",
+        "available": PIPER_AVAILABLE
+    }
+}
 
 # Глобальная переменная для приложения
 telegram_app = None
@@ -82,6 +114,9 @@ class GeminiBot:
         voice_status = "включены" if voice_settings[user_id] else "отключены"
         voice_features_status = "✅ доступны" if VOICE_FEATURES_AVAILABLE else "❌ недоступны"
         
+        current_engine = voice_engine_settings[user_id]
+        engine_info = VOICE_ENGINES.get(current_engine, VOICE_ENGINES["gtts"])
+        
         help_message = f"""📋 Справка по командам:
 
 /start - Приветствие
@@ -89,6 +124,7 @@ class GeminiBot:
 /clear - Очистить историю переписки
 /limits - Показать лимиты запросов
 /voice - Включить/отключить голосовые ответы
+/voice_select - Выбрать голосовой движок
 
 🔄 Как пользоваться:
 • 💬 Отправьте текстовое сообщение для получения ответа
@@ -98,6 +134,7 @@ class GeminiBot:
 
 🎵 Голосовые функции: {voice_features_status}
 Голосовые ответы: {voice_status}
+Текущий голос: {engine_info['name']}
 
 ⚡ Лимиты: 10 запросов в минуту, 250 в день"""
         
@@ -127,11 +164,58 @@ class GeminiBot:
         voice_settings[user_id] = not voice_settings[user_id]
         
         if voice_settings[user_id]:
-            status_message = "🎵 Голосовые ответы включены!\n\nТеперь бот будет отвечать голосом на ваши голосовые сообщения."
+            current_engine = voice_engine_settings[user_id]
+            engine_info = VOICE_ENGINES.get(current_engine, VOICE_ENGINES["gtts"])
+            status_message = f"🎵 Голосовые ответы включены!\n\nТекущий голос: {engine_info['name']}\n{engine_info['description']}\n\nИспользуйте /voice_select для выбора голоса."
         else:
             status_message = "📝 Голосовые ответы отключены.\n\nБот будет отвечать только текстом."
             
         await update.message.reply_text(status_message)
+
+    async def voice_select_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /voice_select - выбор голосового движка"""
+        user_id = update.effective_user.id
+        current_engine = voice_engine_settings[user_id]
+        
+        # Создаем список доступных движков
+        available_engines = []
+        for engine_id, engine_info in VOICE_ENGINES.items():
+            if engine_info["available"]:
+                status = "✅ (текущий)" if engine_id == current_engine else "⚡"
+                available_engines.append(f"{status} {engine_info['name']}\n   {engine_info['description']}")
+        
+        if not available_engines:
+            await update.message.reply_text("❌ Голосовые движки недоступны.")
+            return
+        
+        message = "🎤 Доступные голосовые движки:\n\n" + "\n\n".join(available_engines)
+        message += "\n\n📝 Чтобы выбрать голос, используйте:\n"
+        message += "/voice_gtts - Google TTS\n"
+        message += "/voice_gtts_slow - Google TTS (медленный)\n"
+        if PIPER_AVAILABLE:
+            message += "/voice_piper - Piper TTS (высокое качество)"
+        
+        await update.message.reply_text(message)
+
+    async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
+        """Установка голосового движка"""
+        user_id = update.effective_user.id
+        
+        if engine not in VOICE_ENGINES:
+            await update.message.reply_text("❌ Неизвестный голосовой движок.")
+            return
+        
+        engine_info = VOICE_ENGINES[engine]
+        if not engine_info["available"]:
+            await update.message.reply_text(f"❌ {engine_info['name']} недоступен.")
+            return
+        
+        voice_engine_settings[user_id] = engine
+        await update.message.reply_text(
+            f"✅ Голос изменен на: {engine_info['name']}\n"
+            f"📝 {engine_info['description']}\n\n"
+            f"🎵 Отправьте голосовое сообщение для тестирования!"
+        )
 
     def clean_text_for_speech(self, text: str) -> str:
         """Очистка текста для синтеза речи"""
@@ -291,8 +375,8 @@ class GeminiBot:
             logger.error(f"Error in speech recognition: {e}")
             return None
 
-    async def text_to_speech(self, text: str, language: str = "ru") -> Optional[bytes]:
-        """Синтез речи из текста с помощью gTTS"""
+    async def text_to_speech(self, text: str, user_id: int, language: str = "ru") -> Optional[bytes]:
+        """Синтез речи из текста с поддержкой разных движков"""
         if not VOICE_FEATURES_AVAILABLE:
             return None
             
@@ -302,19 +386,39 @@ class GeminiBot:
                 logger.warning("Text too short for TTS")
                 return None
                 
-            # Ограничение длины текста (gTTS имеет лимиты)
+            # Ограничение длины текста
             if len(text) > 1000:
                 text = text[:1000] + "..."
             
-            logger.debug(f"Converting text to speech: {len(text)} characters")
+            # Получаем выбранный пользователем движок
+            engine = voice_engine_settings.get(user_id, "gtts")
+            logger.debug(f"Converting text to speech with {engine}: {len(text)} characters")
             
+            if engine == "gtts":
+                return await self._gtts_synthesize(text, language, slow=False)
+            elif engine == "gtts_slow":
+                return await self._gtts_synthesize(text, language, slow=True)
+            elif engine == "piper" and PIPER_AVAILABLE:
+                return await self._piper_synthesize(text, language)
+            else:
+                # Fallback к gTTS
+                logger.warning(f"Engine {engine} not available, falling back to gTTS")
+                return await self._gtts_synthesize(text, language, slow=False)
+                    
+        except Exception as e:
+            logger.error(f"Error in text-to-speech: {e}")
+            return None
+
+    async def _gtts_synthesize(self, text: str, language: str, slow: bool = False) -> Optional[bytes]:
+        """Синтез с помощью Google TTS"""
+        try:
             # Создание временного файла для аудио
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
                 temp_path = temp_file.name
             
             try:
                 # Создание TTS объекта
-                tts = gTTS(text=text, lang=language, slow=False)
+                tts = gTTS(text=text, lang=language, slow=slow)
                 
                 # Сохранение в временный файл
                 tts.save(temp_path)
@@ -323,7 +427,7 @@ class GeminiBot:
                 with open(temp_path, 'rb') as audio_file:
                     audio_bytes = audio_file.read()
                 
-                logger.info(f"Text-to-speech success: generated {len(audio_bytes)} bytes")
+                logger.info(f"gTTS synthesis success: generated {len(audio_bytes)} bytes")
                 return audio_bytes
                 
             finally:
@@ -332,10 +436,86 @@ class GeminiBot:
                     os.unlink(temp_path)
                 except:
                     pass
+        except Exception as e:
+            logger.error(f"Error in gTTS synthesis: {e}")
+            return None
+
+    async def _piper_synthesize(self, text: str, language: str) -> Optional[bytes]:
+        """Синтез с помощью Piper TTS"""
+        try:
+            # Проверяем наличие Piper
+            piper_path = "piper_tts/piper/piper"
+            if not os.path.exists(piper_path):
+                logger.warning("Piper TTS not found, using gTTS fallback")
+                return await self._gtts_synthesize(text, language, slow=False)
+            
+            # Выбираем модель голоса
+            if language == "ru":
+                voice_models = [
+                    "piper_voices/ru_RU-dmitri-medium.onnx",
+                    "piper_voices/ru_RU-ruslan-medium.onnx"
+                ]
+            else:
+                # Для других языков используем gTTS
+                logger.warning(f"Piper TTS doesn't support language {language}, using gTTS fallback")
+                return await self._gtts_synthesize(text, language, slow=False)
+            
+            # Ищем доступную модель
+            model_path = None
+            for model in voice_models:
+                if os.path.exists(model):
+                    model_path = model
+                    break
+            
+            if not model_path:
+                logger.warning("No Piper voice models found, using gTTS fallback")
+                return await self._gtts_synthesize(text, language, slow=False)
+            
+            # Создаем временный файл для вывода
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                # Запускаем Piper через subprocess
+                import subprocess
+                import asyncio
+                
+                cmd = [piper_path, "--model", model_path, "--output_file", temp_path]
+                
+                # Асинхронно запускаем процесс
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Отправляем текст в stdin
+                stdout, stderr = await process.communicate(input=text.encode('utf-8'))
+                
+                if process.returncode == 0 and os.path.exists(temp_path):
+                    # Читаем сгенерированный аудио файл
+                    with open(temp_path, 'rb') as audio_file:
+                        audio_bytes = audio_file.read()
+                    
+                    logger.info(f"Piper TTS synthesis success: generated {len(audio_bytes)} bytes")
+                    return audio_bytes
+                else:
+                    logger.error(f"Piper TTS failed: {stderr.decode()}")
+                    return await self._gtts_synthesize(text, language, slow=False)
+                    
+            finally:
+                # Очищаем временный файл
+                try:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                except:
+                    pass
                     
         except Exception as e:
-            logger.error(f"Error in text-to-speech: {e}")
-            return None
+            logger.error(f"Error in Piper TTS synthesis: {e}")
+            # Fallback к gTTS
+            return await self._gtts_synthesize(text, language, slow=False)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений"""
@@ -720,7 +900,7 @@ class GeminiBot:
                     tts_language = "ru" if any('\u0400' <= char <= '\u04FF' for char in clean_response) else "en"
                     
                     # Синтез речи
-                    voice_bytes = await self.text_to_speech(clean_response, tts_language)
+                    voice_bytes = await self.text_to_speech(clean_response, user_id, tts_language)
                     
                     if voice_bytes:
                         try:
@@ -797,6 +977,32 @@ async def start_web_server():
     logger.info(f"Web server started on port {PORT}")
     logger.info(f"Routes: {[route.resource.canonical for route in app.router.routes()]}")
 
+async def setup_piper_if_needed():
+    """Установка Piper TTS если нужно"""
+    try:
+        # Проверяем, установлен ли Piper
+        if not os.path.exists("piper_tts/piper/piper"):
+            logger.info("Piper TTS not found, installing...")
+            
+            # Запускаем установочный скрипт
+            import subprocess
+            result = subprocess.run(["bash", "install_piper.sh"], 
+                                  capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                logger.info("Piper TTS installed successfully")
+                global PIPER_AVAILABLE
+                PIPER_AVAILABLE = True
+                # Обновляем настройки движков
+                VOICE_ENGINES["piper"]["available"] = True
+            else:
+                logger.error(f"Piper TTS installation failed: {result.stderr}")
+        else:
+            logger.info("Piper TTS already installed")
+            
+    except Exception as e:
+        logger.error(f"Error setting up Piper TTS: {e}")
+
 async def main():
     """Основная функция"""
     global telegram_app
@@ -811,6 +1017,10 @@ async def main():
     if not TELEGRAM_TOKEN or not AI_API_KEY:
         logger.error("Missing required environment variables")
         return
+        
+    # Устанавливаем Piper TTS если необходимо
+    if os.environ.get('RENDER'):
+        await setup_piper_if_needed()
     
     # Создание приложения
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -822,6 +1032,10 @@ async def main():
     telegram_app.add_handler(CommandHandler("clear", bot.clear_command))
     telegram_app.add_handler(CommandHandler("limits", bot.limits_command))
     telegram_app.add_handler(CommandHandler("voice", bot.voice_command))
+    telegram_app.add_handler(CommandHandler("voice_select", bot.voice_select_command))
+    telegram_app.add_handler(CommandHandler("voice_gtts", lambda u, c: bot.set_voice_engine_command(u, c, "gtts")))
+    telegram_app.add_handler(CommandHandler("voice_gtts_slow", lambda u, c: bot.set_voice_engine_command(u, c, "gtts_slow")))
+    telegram_app.add_handler(CommandHandler("voice_piper", lambda u, c: bot.set_voice_engine_command(u, c, "piper")))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
     telegram_app.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
