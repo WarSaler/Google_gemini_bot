@@ -489,9 +489,8 @@ class GeminiBot:
                 logger.warning("Text too short for TTS")
                 return None
                 
-            # Ограничение длины текста
-            if len(text) > 1000:
-                text = text[:1000] + "..."
+            # Убираем ограничения длины текста - синтезируем полностью
+            logger.info(f"Synthesizing text of {len(text)} characters")
             
             # Получаем выбранный пользователем движок
             engine = voice_engine_settings.get(user_id, "gtts")
@@ -556,9 +555,10 @@ class GeminiBot:
                     os.unlink(temp_path)
                 except:
                     pass
-                    except Exception as e:
-                logger.error(f"Error in gTTS synthesis: {e}")
-                return None
+                    
+        except Exception as e:
+            logger.error(f"Error in gTTS synthesis: {e}")
+            return None
 
     async def _yandex_synthesize(self, text: str, voice: str = "jane", language: str = "ru") -> Optional[bytes]:
         """Синтез с помощью Yandex SpeechKit (демо версия без API ключа)"""
@@ -567,10 +567,8 @@ class GeminiBot:
             # В продакшене нужен API ключ Yandex Cloud
             logger.info(f"Attempting Yandex SpeechKit synthesis with voice: {voice}")
             
-            # Ограничения для demo версии
-            if len(text) > 500:
-                text = text[:500] + "..."
-                logger.info("Text truncated for Yandex demo")
+            # Убираем ограничения для demo версии - поддерживаем полную длину
+            logger.info(f"Yandex SpeechKit processing {len(text)} characters")
             
             # Fallback к gTTS так как Yandex требует API ключ
             logger.info("Yandex SpeechKit requires API key, falling back to enhanced gTTS")
@@ -683,12 +681,9 @@ class GeminiBot:
                 temp_path = temp_file.name
             
             try:
-                # Для очень длинных текстов используем gTTS для быстроты
-                if len(text) > 800:
-                    logger.info(f"Text is very long ({len(text)} chars), using gTTS for speed")
-                    return await self._gtts_synthesize(text, "ru", slow=False)
-                elif len(text) > 500:
-                    logger.info(f"Text is long ({len(text)} chars), may take more time to synthesize")
+                # Убираем ограничения - синтезируем любую длину текста
+                if len(text) > 1000:
+                    logger.info(f"Text is very long ({len(text)} chars), but will synthesize fully")
                 
                 # Запускаем Piper TTS через командную строку
                 logger.info(f"Running Piper TTS with model: {model_path}")
@@ -713,8 +708,8 @@ class GeminiBot:
                     cwd="/app"  # Устанавливаем рабочую директорию
                 )
                 
-                # Отправляем текст на stdin (увеличиваем таймаут до 90 секунд)
-                stdout, stderr = process.communicate(input=text, timeout=90)
+                # Отправляем текст на stdin (без ограничений по времени для полного ответа)
+                stdout, stderr = process.communicate(input=text, timeout=300)
                 
                 logger.info(f"Piper process completed with return code: {process.returncode}")
                 if stdout:
