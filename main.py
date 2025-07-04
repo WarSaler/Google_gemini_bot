@@ -24,20 +24,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Импорты для голосовых функций
+# Проверка доступности функций
 try:
     from gtts import gTTS
-    from pydub import AudioSegment
+    import tempfile
     import speech_recognition as sr
-    
-    # Piper TTS не требует Python пакет - используем исполняемый файл
-    PIPER_AVAILABLE = False  # Будет определяться динамически в setup_piper_if_needed()
     
     VOICE_FEATURES_AVAILABLE = True
     logger.info("Voice features available")
 except ImportError as e:
     VOICE_FEATURES_AVAILABLE = False
-    PIPER_AVAILABLE = False
     logger.warning(f"Voice features not available: {e}")
 
 # Конфигурация
@@ -55,10 +51,11 @@ DAILY_LIMIT = 250
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
 request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
 voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
-voice_engine_settings: Dict[int, str] = defaultdict(lambda: "piper_irina" if PIPER_AVAILABLE else "gtts")  # По умолчанию Piper Irina
 
-# Голосовой движок по умолчанию - будет инициализирован в initialize_voice_engines()
-DEFAULT_VOICE_ENGINE = "gtts"
+# Голосовые настройки - будут инициализированы в initialize_voice_engines()
+voice_engine_settings: Dict[int, str] = defaultdict(str)  # Будет установлен позже
+VOICE_ENGINES: Dict[str, dict] = {}  # Будет заполнен в initialize_voice_engines()
+DEFAULT_VOICE_ENGINE = "azure_svetlana"  # Будет установлен в initialize_voice_engines()
 
 # Хранилище служебных сообщений для автоудаления
 user_service_messages: Dict[int, List[int]] = defaultdict(list)  # user_id -> [message_id, ...]
@@ -66,95 +63,56 @@ user_service_messages: Dict[int, List[int]] = defaultdict(list)  # user_id -> [m
 # Хранилище обработанных сообщений для предотвращения дублирования
 processed_messages: Dict[str, bool] = {}  # message_id -> processed
 
-# Доступные голосовые движки - инициализация после определения VOICE_FEATURES_AVAILABLE
-VOICE_ENGINES = {}
-
 def initialize_voice_engines():
     """Инициализация голосовых движков"""
     global VOICE_ENGINES
     VOICE_ENGINES = {
         "gtts": {
             "name": "Google TTS",
-            "description": "Стандартный голос Google (женский)",
+            "description": "Стандартный качественный голос Google",
             "available": VOICE_FEATURES_AVAILABLE
         },
-        "gtts_slow": {
-            "name": "Google TTS (медленный)",
-            "description": "Более медленная речь Google (женский)",
-            "available": VOICE_FEATURES_AVAILABLE
-        },
-        # Мужские голоса Piper
-        "piper_dmitri": {
-            "name": "Piper TTS - Дмитрий",
-            "description": "Высокое качество, мужской голос (Дмитрий)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-dmitri-medium"
-        },
-        "piper_ruslan": {
-            "name": "Piper TTS - Руслан", 
-            "description": "Высокое качество, мужской голос (Руслан)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-ruslan-medium"
-        },
-        "piper_pavel": {
-            "name": "Piper TTS - Павел",
-            "description": "Высокое качество, мужской голос (Павел)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-pavel-medium"
-        },
-        # Женские голоса Piper  
-        "piper_irina": {
-            "name": "Piper TTS - Ирина",
-            "description": "Высокое качество, женский голос (Ирина)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-irina-medium"
-        },
-        "piper_anna": {
-            "name": "Piper TTS - Анна",
-            "description": "Высокое качество, женский голос (Анна)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-anna-medium"
-        },
-        "piper_elena": {
-            "name": "Piper TTS - Елена",
-            "description": "Высокое качество, женский голос (Елена)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-elena-medium"
-        },
-        "piper_arina": {
-            "name": "Piper TTS - Арина",
-            "description": "Премиум качество, женский голос (Арина)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-arina-high"
-        },
-        # Yandex SpeechKit голоса (Alice-like quality)
-        "yandex_jane": {
-            "name": "Yandex SpeechKit - Jane",
-            "description": "Премиум качество, женский голос как у Алисы (Jane)",
+        # Azure Speech Services - мужские голоса
+        "azure_dmitri": {
+            "name": "Azure Speech - Дмитрий",
+            "description": "Реалистичный мужской голос высокого качества",
             "available": VOICE_FEATURES_AVAILABLE,
-            "yandex_voice": "jane"
+            "azure_voice": "ru-RU-DmitryNeural"
         },
-        "yandex_alena": {
-            "name": "Yandex SpeechKit - Alena", 
-            "description": "Премиум качество, женский голос (Alena)",
+        "azure_artem": {
+            "name": "Azure Speech - Артём",
+            "description": "Естественный мужской голос",
             "available": VOICE_FEATURES_AVAILABLE,
-            "yandex_voice": "alena"
+            "azure_voice": "ru-RU-ArtemNeural"
         },
-        "yandex_filipp": {
-            "name": "Yandex SpeechKit - Filipp",
-            "description": "Премиум качество, мужской голос (Filipp)",
+        # Azure Speech Services - женские голоса  
+        "azure_svetlana": {
+            "name": "Azure Speech - Светлана",
+            "description": "Реалистичный женский голос высокого качества",
             "available": VOICE_FEATURES_AVAILABLE,
-            "yandex_voice": "filipp"
+            "azure_voice": "ru-RU-SvetlanaNeural"
+        },
+        "azure_darya": {
+            "name": "Azure Speech - Дарья",
+            "description": "Естественный женский голос",
+            "available": VOICE_FEATURES_AVAILABLE,
+            "azure_voice": "ru-RU-DaryaNeural"
+        },
+        "azure_polina": {
+            "name": "Azure Speech - Полина",
+            "description": "Мягкий женский голос",
+            "available": VOICE_FEATURES_AVAILABLE,
+            "azure_voice": "ru-RU-PolinaNeural"
         }
     }
     
     # Обновляем дефолтные настройки голоса для новых пользователей
     global voice_engine_settings, DEFAULT_VOICE_ENGINE
-    default_engine = "piper_irina" if PIPER_AVAILABLE else "gtts"
-    DEFAULT_VOICE_ENGINE = default_engine  # Добавляем глобальную переменную
+    default_engine = "azure_svetlana"  # Azure по умолчанию
+    DEFAULT_VOICE_ENGINE = default_engine
     voice_engine_settings = defaultdict(lambda: default_engine)
     
-    logger.info(f"Voice engines initialized. PIPER_AVAILABLE: {PIPER_AVAILABLE}")
+    logger.info(f"Voice engines initialized.")
     logger.info(f"Default voice engine: {default_engine}")
     
     # Логируем доступные движки
@@ -254,72 +212,63 @@ class GeminiBot:
         await update.message.reply_text(status_message)
 
     async def voice_select_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда /voice_select - выбор голосового движка"""
+        """Команда выбора голосового движка"""
         user_id = update.effective_user.id
-        current_engine = voice_engine_settings[user_id]
+        current_engine = voice_engine_settings.get(user_id, DEFAULT_VOICE_ENGINE)
+        current_info = VOICE_ENGINES.get(current_engine, VOICE_ENGINES["gtts"])
         
-        # Создаем список доступных движков, разделенных по категориям
-        google_engines = []
-        piper_male_engines = []
-        piper_female_engines = []
-        yandex_engines = []
+        message = f"🎵 **Текущий голос:** {current_info['name']}\n\n"
+        message += "🎤 **Доступные голосовые движки:**\n\n"
         
-        for engine_id, engine_info in VOICE_ENGINES.items():
-            if engine_info["available"]:
-                status = "✅ (текущий)" if engine_id == current_engine else "⚡"
-                engine_line = f"{status} {engine_info['name']}\n   {engine_info['description']}"
-                
-                if engine_id.startswith("gtts"):
-                    google_engines.append(engine_line)
-                elif engine_id.startswith("piper_") and ("мужской" in engine_info['description'] or "Дмитрий" in engine_info['name'] or "Руслан" in engine_info['name'] or "Павел" in engine_info['name']):
-                    piper_male_engines.append(engine_line)
-                elif engine_id.startswith("piper_"):
-                    piper_female_engines.append(engine_line)
-                elif engine_id.startswith("yandex_"):
-                    yandex_engines.append(engine_line)
+        # Google TTS
+        gtts_engines = []
+        for engine_id, info in VOICE_ENGINES.items():
+            if info["available"] and engine_id.startswith("gtts"):
+                marker = " ✅" if engine_id == current_engine else ""
+                gtts_engines.append(f"• {info['name']}{marker}\n  {info['description']}")
         
-        if not any([google_engines, piper_male_engines, piper_female_engines, yandex_engines]):
-            await update.message.reply_text("❌ Голосовые движки недоступны.")
-            return
+        # Azure Speech Services - мужские голоса
+        azure_male_engines = []
+        for engine_id, info in VOICE_ENGINES.items():
+            if info["available"] and engine_id.startswith("azure_") and any(male in info['name'] for male in ['Дмитрий', 'Артём']):
+                marker = " ✅" if engine_id == current_engine else ""
+                azure_male_engines.append(f"• {info['name']}{marker}\n  {info['description']}")
         
-        message = "🎤 Доступные голосовые движки:\n\n"
+        # Azure Speech Services - женские голоса
+        azure_female_engines = []
+        for engine_id, info in VOICE_ENGINES.items():
+            if info["available"] and engine_id.startswith("azure_") and any(female in info['name'] for female in ['Светлана', 'Дарья', 'Полина']):
+                marker = " ✅" if engine_id == current_engine else ""
+                azure_female_engines.append(f"• {info['name']}{marker}\n  {info['description']}")
         
-        if google_engines:
-            message += "📱 *Google TTS:*\n" + "\n".join(google_engines) + "\n\n"
-        
-        if piper_male_engines:
-            message += "👨 *Piper TTS - Мужские голоса:*\n" + "\n".join(piper_male_engines) + "\n\n"
-        
-        if piper_female_engines:
-            message += "👩 *Piper TTS - Женские голоса:*\n" + "\n".join(piper_female_engines) + "\n\n"
+        if gtts_engines:
+            message += "🌐 *Google TTS:*\n" + "\n".join(gtts_engines) + "\n\n"
             
-        if yandex_engines:
-            message += "🌟 *Yandex SpeechKit - Премиум качество:*\n" + "\n".join(yandex_engines) + "\n\n"
+        if azure_male_engines:
+            message += "👨 *Azure Speech - Мужские голоса:*\n" + "\n".join(azure_male_engines) + "\n\n"
+            
+        if azure_female_engines:
+            message += "👩 *Azure Speech - Женские голоса:*\n" + "\n".join(azure_female_engines) + "\n\n"
         
         # Команды для быстрого выбора (отправляем отдельным сообщением чтобы избежать лимита)  
-        commands_message = "📝 Команды для выбора голоса:\n\n"
-        commands_message += "Google TTS:\n"
-        commands_message += "/voicegtts - Google TTS\n"
-        commands_message += "/voicegttsslow - Google TTS (медленный)\n\n"
+        commands_message = "📝 **Команды для выбора голоса:**\n\n"
+        commands_message += "**Google TTS:**\n"
+        commands_message += "/voicegtts - Google TTS\n\n"
         
-        if piper_male_engines or piper_female_engines:
-            commands_message += "Piper TTS (высокое качество):\n"
-            commands_message += "/voicedmitri - Дмитрий (мужской)\n"
-            commands_message += "/voiceruslan - Руслан (мужской)\n"
-            commands_message += "/voiceirina - Ирина (женский)\n"
-            commands_message += "/voiceanna - Анна (женский)\n\n"
+        commands_message += "**Azure Speech Services:**\n"
+        commands_message += "👨 Мужские голоса:\n"
+        commands_message += "/voicedmitri - Дмитрий (реалистичный)\n"
+        commands_message += "/voiceartem - Артём (естественный)\n\n"
+        commands_message += "👩 Женские голоса:\n"
+        commands_message += "/voicesvetlana - Светлана (реалистичный)\n"
+        commands_message += "/voicedarya - Дарья (естественный)\n"
+        commands_message += "/voicepolina - Полина (мягкий)\n\n"
         
-        if yandex_engines:
-            commands_message += "Yandex SpeechKit:\n"
-            commands_message += "/voicejane - Jane (женский, как Алиса)\n"
-            commands_message += "/voicealena - Alena (женский)\n"
-            commands_message += "/voicefilipp - Filipp (мужской)\n\n"
-        
-        commands_message += "💡 Команды работают и с подчеркиванием (/voice_ruslan) и без (/voiceruslan)"
+        commands_message += "💡 Команды работают и с подчеркиванием (/voice_dmitri) и без (/voicedmitri)"
         
         # Отправляем сообщения отдельно чтобы избежать лимитов
         await update.message.reply_text(message, parse_mode='Markdown')
-        await update.message.reply_text(commands_message)
+        await update.message.reply_text(commands_message, parse_mode='Markdown')
 
     async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
         """Установка голосового движка"""
@@ -613,7 +562,7 @@ class GeminiBot:
             return None
 
     async def text_to_speech(self, text: str, user_id: int, language: str = "ru") -> Optional[bytes]:
-        """Синтез речи из текста с поддержкой разных движков"""
+        """Синтез речи из текста с поддержкой Google TTS и Azure Speech Services"""
         if not VOICE_FEATURES_AVAILABLE:
             return None
             
@@ -623,13 +572,12 @@ class GeminiBot:
                 logger.warning("Text too short for TTS")
                 return None
                 
-            # Убираем ограничения длины текста - синтезируем полностью
+            # Синтезируем полностью весь текст
             logger.info(f"Synthesizing text of {len(text)} characters")
             
             # Получаем выбранный пользователем движок
-            engine = voice_engine_settings.get(user_id, "gtts")
+            engine = voice_engine_settings.get(user_id, DEFAULT_VOICE_ENGINE)
             logger.info(f"User {user_id} selected engine: {engine}")
-            logger.info(f"PIPER_AVAILABLE: {PIPER_AVAILABLE}")
             logger.debug(f"Converting text to speech with {engine}: {len(text)} characters")
             
             # Проверяем доступность движка
@@ -640,46 +588,31 @@ class GeminiBot:
                 logger.warning(f"No engine info found for {engine}")
             
             if engine == "gtts":
-                logger.info("Using Google TTS (standard)")
-                return await self._gtts_synthesize(text, language, slow=False)
-            elif engine == "gtts_slow":
-                logger.info("Using Google TTS (slow)")
-                return await self._gtts_synthesize(text, language, slow=True)
-            elif engine.startswith("piper_") and PIPER_AVAILABLE:
-                logger.info(f"Using Piper TTS with engine: {engine}")
-                # Определяем голосовую модель из настроек движка
+                logger.info("Using Google TTS")
+                return await self._gtts_synthesize(text, language)
+            elif engine.startswith("azure_"):
+                logger.info(f"Using Azure Speech Services with engine: {engine}")
+                # Azure Speech Services TTS
                 engine_info = VOICE_ENGINES.get(engine)
-                if engine_info and "voice_model" in engine_info:
-                    voice_model = engine_info["voice_model"]
-                    logger.info(f"Using voice model: {voice_model}")
-                    return await self._piper_synthesize(text, voice_model)
-                else:
-                    # Fallback к Дмитрию если модель не найдена
-                    logger.warning(f"Voice model not found for {engine}, using fallback: ru_RU-dmitri-medium")
-                    return await self._piper_synthesize(text, "ru_RU-dmitri-medium")
-            elif engine.startswith("yandex_"):
-                logger.info(f"Using Yandex SpeechKit with engine: {engine}")
-                # Yandex SpeechKit TTS
-                engine_info = VOICE_ENGINES.get(engine)
-                if engine_info and "yandex_voice" in engine_info:
-                    yandex_voice = engine_info["yandex_voice"]
-                    logger.info(f"Using Yandex voice: {yandex_voice}")
-                    return await self._yandex_synthesize(text, yandex_voice, language)
+                if engine_info and "azure_voice" in engine_info:
+                    azure_voice = engine_info["azure_voice"]
+                    logger.info(f"Using Azure voice: {azure_voice}")
+                    return await self._azure_synthesize(text, azure_voice)
                 else:
                     # Fallback к gTTS
-                    logger.warning(f"Yandex voice not configured for {engine}, falling back to gTTS")
-                    return await self._gtts_synthesize(text, language, slow=False)
+                    logger.warning(f"Azure voice not configured for {engine}, falling back to gTTS")
+                    return await self._gtts_synthesize(text, language)
             else:
                 # Fallback к gTTS
                 logger.warning(f"Engine {engine} not available or not supported, falling back to gTTS")
                 logger.warning(f"Available engines: {list(VOICE_ENGINES.keys())}")
-                return await self._gtts_synthesize(text, language, slow=False)
+                return await self._gtts_synthesize(text, language)
                     
         except Exception as e:
             logger.error(f"Error in text-to-speech: {e}")
             return None
 
-    async def _gtts_synthesize(self, text: str, language: str, slow: bool = False) -> Optional[bytes]:
+    async def _gtts_synthesize(self, text: str, language: str) -> Optional[bytes]:
         """Синтез с помощью Google TTS"""
         try:
             # Создание временного файла для аудио
@@ -688,7 +621,7 @@ class GeminiBot:
             
             try:
                 # Создание TTS объекта
-                tts = gTTS(text=text, lang=language, slow=slow)
+                tts = gTTS(text=text, lang=language)
                 
                 # Сохранение в временный файл
                 tts.save(temp_path)
@@ -711,186 +644,48 @@ class GeminiBot:
             logger.error(f"Error in gTTS synthesis: {e}")
             return None
 
-    async def _yandex_synthesize(self, text: str, voice: str = "jane", language: str = "ru") -> Optional[bytes]:
-        """Синтез с помощью Yandex SpeechKit (демо версия без API ключа)"""
+    async def _azure_synthesize(self, text: str, voice: str = "ru-RU-SvetlanaNeural") -> Optional[bytes]:
+        """Синтез с помощью Azure Speech Services"""
         try:
-            # Для демонстрации используем публичный demo endpoint
-            # В продакшене нужен API ключ Yandex Cloud
-            logger.info(f"Attempting Yandex SpeechKit synthesis with voice: {voice}")
+            # Проверяем наличие API ключа Azure
+            azure_api_key = os.getenv('AZURE_SPEECH_KEY')
+            azure_region = os.getenv('AZURE_SPEECH_REGION', 'eastus')
             
-            # Убираем ограничения для demo версии - поддерживаем полную длину
-            logger.info(f"Yandex SpeechKit processing {len(text)} characters")
-            
-            # Fallback к gTTS так как Yandex требует API ключ
-            logger.info("Yandex SpeechKit requires API key, falling back to enhanced gTTS")
-            
-            # Используем gTTS с БЫСТРЫМИ настройками
-            return await self._gtts_synthesize(text, language, slow=False)  # БЫСТРАЯ речь для скорости
-            
-        except Exception as e:
-            logger.error(f"Error in Yandex synthesis: {e}")
-            # Fallback к gTTS
-            return await self._gtts_synthesize(text, language, slow=False)
-
-    async def _piper_synthesize(self, text: str, voice_model: str = "ru_RU-dmitri-medium") -> Optional[bytes]:
-        """Синтез с помощью Piper TTS - используя --output-raw метод для русского языка"""
-        try:
-            import tempfile
-            import os
-            import subprocess
-            
-            # Определяем модель голоса
-            if not voice_model:
-                voice_model = "ru_RU-dmitri-medium"
-            
-            # Список всех доступных моделей (в порядке приоритета для fallback)
-            working_models = [
-                voice_model,             # Сначала пробуем запрошенную модель
-                "ru_RU-irina-medium",    # Женский голос, резерв
-                "ru_RU-dmitri-medium",   # Мужской голос, резерв  
-                "ru_RU-ruslan-medium",   # Мужской голос, резерв
-                "ru_RU-anna-medium",     # Женский голос, резерв
-            ]
-            
-            # Убираем дубликаты, сохраняя порядок
-            seen = set()
-            working_models = [x for x in working_models if not (x in seen or seen.add(x))]
-            
-            # Ищем первую рабочую модель из списка
-            voices_dir = "/app/piper_tts/voices"
-            final_voice_model = None
-            final_model_path = None
-            
-            if os.path.exists(voices_dir):
-                for test_model in working_models:
-                    test_model_path = f"/app/piper_tts/voices/{test_model}.onnx"
-                    test_config_path = f"/app/piper_tts/voices/{test_model}.onnx.json"
-                    
-                    if os.path.exists(test_model_path) and os.path.exists(test_config_path):
-                        final_voice_model = test_model
-                        final_model_path = test_model_path
-                        if test_model == voice_model:
-                            logger.info(f"Using requested voice model: {voice_model}")
-                        else:
-                            logger.info(f"Using fallback voice model: {test_model} (requested: {voice_model})")
-                        break
-                
-                if not final_voice_model:
-                    logger.error("No working voice models found with both .onnx and .onnx.json files")
-                    return None
-            else:
-                logger.error("Voices directory not found")
+            if not azure_api_key:
+                logger.error("Azure Speech API key not found")
                 return None
             
-            # Используем найденную модель
-            voice_model = final_voice_model
-            model_path = final_model_path
+            # Создаем SSML для Azure Speech
+            ssml = f"""
+            <speak version='1.0' xml:lang='ru-RU'>
+                <voice xml:lang='ru-RU' xml:gender='Female' name='{voice}'>
+                    {text}
+                </voice>
+            </speak>
+            """
             
-            # Проверяем наличие исполняемого файла piper
-            piper_executable = "/app/piper_tts/bin/piper/piper"
-            if not os.path.exists(piper_executable) or not os.access(piper_executable, os.X_OK):
-                logger.error(f"Piper executable not found at: {piper_executable}")
-                return None
+            headers = {
+                'Ocp-Apim-Subscription-Key': azure_api_key,
+                'Content-Type': 'application/ssml+xml',
+                'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3'
+            }
             
-            # Очистка и подготовка текста для русского языка
-            clean_text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-            clean_text = ' '.join(clean_text.split())  # Убираем множественные пробелы
-            clean_text = clean_text.strip()
+            url = f"https://{azure_region}.tts.speech.microsoft.com/cognitiveservices/v1"
             
-            if not clean_text:
-                logger.error("Empty text after cleaning")
-                return None
-            
-            # Ограничиваем длину текста для стабильности
-            if len(clean_text) > 500:
-                clean_text = clean_text[:497] + "..."
-                logger.info(f"Text truncated to 500 characters for stability")
-            
-            logger.info(f"Synthesizing Russian text: '{clean_text}' (length: {len(clean_text)})")
-            
-            # Создаем временный файл для результата
-            wav_fd, wav_filename = tempfile.mkstemp(suffix=".wav")
-            os.close(wav_fd)
-            
-            try:
-                # Упрощенная команда для Piper TTS с выводом в файл напрямую
-                # echo 'текст' | piper --model model.onnx --output_file output.wav
-                piper_cmd = [
-                    piper_executable,
-                    "--model", model_path,
-                    "--output_file", wav_filename
-                ]
-                
-                logger.info(f"Piper command: {' '.join(piper_cmd)}")
-                logger.info(f"Input text length: {len(clean_text)} characters")
-                
-                # Запускаем Piper TTS с увеличенным timeout
-                process = subprocess.Popen(
-                    piper_cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                # Передаем текст и ждем завершения с увеличенным timeout
-                try:
-                    stdout, stderr = process.communicate(input=clean_text, timeout=30)  # Увеличен timeout до 30 секунд
-                    return_code = process.returncode
-                    
-                    logger.info(f"Piper process completed with return code: {return_code}")
-                    if stdout:
-                        logger.info(f"Piper stdout: {stdout}")
-                    if stderr:
-                        logger.info(f"Piper stderr: {stderr}")
-                    
-                    if return_code != 0:
-                        logger.error(f"Piper failed with return code {return_code}")
-                        if stderr:
-                            logger.error(f"Error details: {stderr}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, data=ssml.encode('utf-8'), timeout=30) as response:
+                    if response.status == 200:
+                        audio_data = await response.read()
+                        logger.info(f"✅ Azure Speech synthesis successful: {len(audio_data)} bytes")
+                        return audio_data
+                    else:
+                        logger.error(f"Azure Speech API error: {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"Error details: {error_text}")
                         return None
-                    
-                except subprocess.TimeoutExpired:
-                    logger.error("Piper TTS timeout after 30 seconds")
-                    process.kill()
-                    process.wait()
-                    return None
-                
-                # Проверяем результат
-                if not os.path.exists(wav_filename):
-                    logger.error("Output audio file was not created")
-                    return None
-                
-                file_size = os.path.getsize(wav_filename)
-                logger.info(f"Generated audio file size: {file_size} bytes")
-                
-                if file_size == 0:
-                    logger.error("Generated audio file is empty")
-                    return None
-                
-                # Читаем аудио данные
-                with open(wav_filename, 'rb') as f:
-                    audio_data = f.read()
-                
-                if len(audio_data) > 0:
-                    logger.info(f"✅ Successfully synthesized {len(audio_data)} bytes with Piper TTS")
-                    return audio_data
-                else:
-                    logger.error("Audio data is empty after reading file")
-                    return None
-                    
-            finally:
-                # Обязательная очистка временного файла
-                if os.path.exists(wav_filename):
-                    try:
-                        os.unlink(wav_filename)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete temp file {wav_filename}: {e}")
-                            
+        
         except Exception as e:
-            logger.error(f"Error in Piper TTS synthesis: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error in Azure Speech synthesis: {e}")
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1139,18 +934,51 @@ class GeminiBot:
             return "Ошибка при обработке запроса о возрасте."
 
     async def safe_send_message(self, update: Update, response: str):
-        """Безопасная отправка сообщения"""
-        try:
-            if len(response) > 4096:
-                # Разбиваем длинное сообщение
-                for i in range(0, len(response), 4096):
-                    await update.message.reply_text(response[i:i+4096])
-            else:
-                await update.message.reply_text(response)
+        """Безопасная отправка сообщений с учетом лимитов Telegram"""
+        max_length = 4096  # Максимальный лимит Telegram для текстовых сообщений
+        
+        if len(response) <= max_length:
+            # Короткое сообщение - отправляем целиком
+            await update.message.reply_text(response)
+        else:
+            # Длинное сообщение - разбиваем на части
+            parts = []
+            current_part = ""
+            
+            # Разбиваем по предложениям
+            sentences = re.split(r'(?<=[.!?])\s+', response)
+            
+            for sentence in sentences:
+                # Если добавление предложения не превышает лимит
+                if len(current_part + sentence) <= max_length:
+                    current_part += sentence + " "
+                else:
+                    # Сохраняем текущую часть и начинаем новую
+                    if current_part:
+                        parts.append(current_part.strip())
+                    
+                    # Если само предложение очень длинное - принудительно разбиваем
+                    if len(sentence) > max_length:
+                        for i in range(0, len(sentence), max_length):
+                            parts.append(sentence[i:i + max_length])
+                        current_part = ""
+                    else:
+                        current_part = sentence + " "
+            
+            # Добавляем последнюю часть
+            if current_part:
+                parts.append(current_part.strip())
+            
+            # Отправляем части
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await update.message.reply_text(part)
+                else:
+                    await update.message.reply_text(f"(продолжение {i+1}/{len(parts)})\n\n{part}")
                 
-        except Exception as e:
-            logger.error(f"Error sending message: {e}")
-            await update.message.reply_text("Ошибка при отправке сообщения.")
+                # Небольшая задержка между сообщениями
+                if i < len(parts) - 1:
+                    await asyncio.sleep(0.5)
 
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка изображений"""
@@ -1315,34 +1143,24 @@ class GeminiBot:
                     # Очистка текста от markdown символов для лучшего озвучивания
                     clean_response = self.clean_text_for_speech(response)
                     
-                    # Умная разбивка длинного текста с увеличенным лимитом
-                    text_parts = self.smart_split_text(clean_response, max_chars=200)
-                    logger.info(f"Split text into {len(text_parts)} parts for voice synthesis")
+                    # ДЛЯ ГОЛОСОВЫХ СООБЩЕНИЙ: весь ответ в одном файле, без разделения
+                    logger.info(f"Synthesizing complete voice response: {len(clean_response)} characters")
+                    voice_data = await self.text_to_speech(clean_response, user_id)
                     
-                    if len(text_parts) == 1:
-                        # Короткий текст - отправляем одним сообщением
-                        logger.info(f"Synthesizing single part of {len(text_parts[0])} characters")
-                        voice_data = await self.text_to_speech(text_parts[0], user_id)
-                        
-                        if voice_data:
-                            await self.cleanup_service_messages(update, context, user_id)
-                            await update.message.reply_voice(
-                                voice=BytesIO(voice_data),
-                                caption=f"🎤 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                            )
-                            logger.info(f"Successfully sent single voice response to user {user_id}")
-                            user_sessions[user_id].append({"role": "assistant", "content": response})
-                        else:
-                            # Fallback к тексту
-                            await self.cleanup_service_messages(update, context, user_id)
-                            await update.message.reply_text(
-                                f"💬 {response}\n\n⚠️ Не удалось создать голосовой ответ\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                            )
-                            user_sessions[user_id].append({"role": "assistant", "content": response})
+                    if voice_data:
+                        await self.cleanup_service_messages(update, context, user_id)
+                        await update.message.reply_voice(
+                            voice=BytesIO(voice_data),
+                            caption=f"🎤 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                        )
+                        logger.info(f"Successfully sent complete voice response to user {user_id}")
+                        user_sessions[user_id].append({"role": "assistant", "content": response})
                     else:
-                        # Длинный текст - отправляем частями
-                        logger.info(f"Sending long response as {len(text_parts)} voice parts")
-                        await self.send_voice_parts(update, context, text_parts, user_id, remaining_minute, remaining_day)
+                        # Fallback к тексту
+                        await self.cleanup_service_messages(update, context, user_id)
+                        await update.message.reply_text(
+                            f"💬 {response}\n\n⚠️ Не удалось создать голосовой ответ\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                        )
                         user_sessions[user_id].append({"role": "assistant", "content": response})
                 else:
                     # Текстовый ответ
@@ -1376,57 +1194,10 @@ class GeminiBot:
                 for key in old_keys:
                     processed_messages.pop(key, None)
 
-    async def send_voice_parts(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                              text_parts: List[str], user_id: int, remaining_minute: int, remaining_day: int):
-        """Отправляет несколько голосовых сообщений для длинного текста"""
-        
-        total_parts = len(text_parts)
-        logger.info(f"Sending {total_parts} voice parts to user {user_id}")
-        
-        for i, part in enumerate(text_parts, 1):
-            try:
-                # Генерируем голосовое сообщение для каждой части
-                await self.send_service_message(update, context, f"🎵 Генерирую часть {i}/{total_parts}...", user_id)
-                
-                voice_data = await self.text_to_speech(part, user_id)
-                
-                if voice_data:
-                    await self.cleanup_service_messages(update, context, user_id)
-                    
-                    # Caption для первого и последнего сообщения
-                    if i == 1 and total_parts > 1:
-                        caption = f"🎤 Голосовой ответ (часть {i}/{total_parts})"
-                    elif i == total_parts:
-                        caption = f"🎤 Завершение (часть {i}/{total_parts})\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                    else:
-                        caption = f"🎤 Продолжение (часть {i}/{total_parts})"
-                    
-                    await update.message.reply_voice(
-                        voice=BytesIO(voice_data),
-                        caption=caption
-                    )
-                    
-                    # Небольшая задержка между сообщениями
-                    if i < total_parts:
-                        await asyncio.sleep(0.5)
-                        
-                else:
-                    # Если синтез не удался, отправляем текстом
-                    await self.cleanup_service_messages(update, context, user_id)
-                    await update.message.reply_text(
-                        f"💬 Часть {i}/{total_parts}: {part}\n\n"
-                        f"⚠️ Не удалось создать голосовой ответ для этой части"
-                    )
-                    
-            except Exception as e:
-                logger.error(f"Error sending voice part {i}: {e}")
-                await self.cleanup_service_messages(update, context, user_id)
-                await update.message.reply_text(f"💬 Часть {i}/{total_parts}: {part}")
-
     async def add_service_message(self, user_id: int, message_id: int):
-        """Добавляет служебное сообщение в список для автоудаления"""
+        """Добавление служебного сообщения для отслеживания"""
         user_service_messages[user_id].append(message_id)
-        
+
     async def cleanup_service_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
         """Удаляет все накопленные служебные сообщения пользователя"""
         try:
@@ -1525,96 +1296,7 @@ async def start_web_server():
     await site.start()
     logger.info(f"Web server started on port {PORT}")
     logger.info(f"Routes: {[route.resource.canonical for route in app.router.routes()]}")
-
-def setup_piper_if_needed():
-    """Устанавливает Piper TTS если не установлен"""
-    global PIPER_AVAILABLE
-    
-    # Проверяем наличие исполняемого файла Piper
-    piper_executable_available = False
-    executable_paths = [
-        "piper_tts/bin/piper/piper",
-        "/usr/local/bin/piper",
-        "/usr/bin/piper"
-    ]
-    
-    for path in executable_paths:
-        if os.path.exists(path) and os.access(path, os.X_OK):
-            try:
-                result = subprocess.run([path, "--help"], 
-                                      capture_output=True, timeout=5)
-                if result.returncode == 0:
-                    piper_executable_available = True
-                    logger.info(f"Piper executable found at: {path}")
-                    break
-            except:
-                continue
-    
-    # Проверяем наличие голосовых моделей
-    voices_dir = "piper_tts/voices"
-    models_exist = False
-    
-    if os.path.exists(voices_dir):
-        onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
-        if len(onnx_files) >= 4:  # Ожидаем 4 голосовые модели
-            models_exist = True
-            logger.info(f"Found {len(onnx_files)} voice models")
-        else:
-            logger.info(f"Found only {len(onnx_files)} voice models, need to download more")
-    else:
-        logger.info("Voices directory not found, will create and download models")
-    
-    # Запускаем установочный скрипт если нужно установить Piper или скачать модели
-    if not piper_executable_available or not models_exist:
-        logger.info("Running Piper TTS installation script...")
-        result = subprocess.run(['bash', 'install_piper.sh'], 
-                              capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            logger.info("Piper TTS installation script completed successfully")
-            logger.info(f"Installation stdout: {result.stdout}")
-            
-            # Проверяем исполняемый файл после установки
-            if not piper_executable_available:
-                for path in executable_paths:
-                    if os.path.exists(path) and os.access(path, os.X_OK):
-                        try:
-                            result = subprocess.run([path, "--help"], 
-                                                  capture_output=True, timeout=5)
-                            if result.returncode == 0:
-                                piper_executable_available = True
-                                logger.info(f"Piper executable installed successfully at: {path}")
-                                break
-                        except:
-                            continue
-            
-            # Проверяем наличие голосовых моделей
-            if os.path.exists(voices_dir):
-                onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
-                logger.info(f"Voice models after installation: {len(onnx_files)} found")
-                if len(onnx_files) > 0:
-                    logger.info(f"Available models: {onnx_files}")
-                    PIPER_AVAILABLE = True
-                    return True
-                else:
-                    logger.warning("No voice models found after installation")
-                    PIPER_AVAILABLE = False
-                    return False
-            else:
-                logger.error("Voices directory still not found after installation")
-                PIPER_AVAILABLE = False
-                return False
-        else:
-            logger.error(f"Piper TTS installation failed: {result.stderr}")
-            logger.error(f"Installation stdout: {result.stdout}")
-            PIPER_AVAILABLE = False
-            return False
-    else:
-        # Piper уже установлен
-        PIPER_AVAILABLE = True
-        logger.info("Piper TTS already available")
-    
-    return True
+    return app
 
 async def main():
     """Основная функция"""
@@ -1624,6 +1306,7 @@ async def main():
     logger.info(f"TELEGRAM_TOKEN: {'✓' if TELEGRAM_TOKEN else '✗'}")
     logger.info(f"AI_API_KEY: {'✓' if AI_API_KEY else '✗'}")
     logger.info(f"NEWS_API_KEY: {'✓' if NEWS_API_KEY else '✗'}")
+    logger.info(f"AZURE_SPEECH_KEY: {'✓' if os.getenv('AZURE_SPEECH_KEY') else '✗'}")
     logger.info(f"PORT: {PORT}")
     logger.info(f"RENDER environment: {'✓' if os.environ.get('RENDER') else '✗'}")
     
@@ -1631,16 +1314,9 @@ async def main():
         logger.error("Missing required environment variables")
         return
         
-    # Устанавливаем Piper TTS если необходимо
-    if os.environ.get('RENDER'):
-        if setup_piper_if_needed():
-            # Переинициализируем движки после установки Piper
-            initialize_voice_engines()
-            logger.info("Voice engines reinitialized after Piper setup")
-    else:
-        # Локальная разработка - просто инициализируем движки
-        initialize_voice_engines()
-        logger.info("Voice engines initialized for local development")
+    # Инициализируем голосовые движки
+    initialize_voice_engines()
+    logger.info("Voice engines initialized")
     
     # Создание приложения
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1655,45 +1331,32 @@ async def main():
     telegram_app.add_handler(CommandHandler("voice_select", bot.voice_select_command))
     # Голосовые команды - используем отдельные методы вместо лямбда
     async def voice_gtts_command(u, c): await bot.set_voice_engine_command(u, c, "gtts")
-    async def voice_gtts_slow_command(u, c): await bot.set_voice_engine_command(u, c, "gtts_slow")
-    async def voice_dmitri_command(u, c): await bot.set_voice_engine_command(u, c, "piper_dmitri")
-    async def voice_ruslan_command(u, c): await bot.set_voice_engine_command(u, c, "piper_ruslan")
-    async def voice_pavel_command(u, c): await bot.set_voice_engine_command(u, c, "piper_pavel")
-    async def voice_irina_command(u, c): await bot.set_voice_engine_command(u, c, "piper_irina")
-    async def voice_anna_command(u, c): await bot.set_voice_engine_command(u, c, "piper_anna")
-    async def voice_elena_command(u, c): await bot.set_voice_engine_command(u, c, "piper_elena")
-    async def voice_arina_command(u, c): await bot.set_voice_engine_command(u, c, "piper_arina")
-    async def voice_jane_command(u, c): await bot.set_voice_engine_command(u, c, "yandex_jane")
-    async def voice_alena_command(u, c): await bot.set_voice_engine_command(u, c, "yandex_alena")
-    async def voice_filipp_command(u, c): await bot.set_voice_engine_command(u, c, "yandex_filipp")
+    # Azure Speech Services команды
+    async def voice_dmitri_command(u, c): await bot.set_voice_engine_command(u, c, "azure_dmitri")
+    async def voice_artem_command(u, c): await bot.set_voice_engine_command(u, c, "azure_artem")
+    async def voice_svetlana_command(u, c): await bot.set_voice_engine_command(u, c, "azure_svetlana")
+    async def voice_darya_command(u, c): await bot.set_voice_engine_command(u, c, "azure_darya")
+    async def voice_polina_command(u, c): await bot.set_voice_engine_command(u, c, "azure_polina")
     
     # ДОБАВЛЯЕМ ОБРАБОТЧИКИ ДЛЯ КОМАНД С ПОДЧЕРКИВАНИЕМ И БЕЗ
+    # Google TTS
     telegram_app.add_handler(CommandHandler("voice_gtts", voice_gtts_command))
     telegram_app.add_handler(CommandHandler("voicegtts", voice_gtts_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_gtts_slow", voice_gtts_slow_command))
-    telegram_app.add_handler(CommandHandler("voicegttsslow", voice_gtts_slow_command))  # БЕЗ подчеркивания
-    # Piper TTS голоса
+    
+    # Azure Speech Services голоса
+    # Мужские голоса
     telegram_app.add_handler(CommandHandler("voice_dmitri", voice_dmitri_command))
     telegram_app.add_handler(CommandHandler("voicedmitri", voice_dmitri_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_ruslan", voice_ruslan_command))
-    telegram_app.add_handler(CommandHandler("voiceruslan", voice_ruslan_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_pavel", voice_pavel_command))
-    telegram_app.add_handler(CommandHandler("voicepavel", voice_pavel_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_irina", voice_irina_command))
-    telegram_app.add_handler(CommandHandler("voiceirina", voice_irina_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_anna", voice_anna_command))
-    telegram_app.add_handler(CommandHandler("voiceanna", voice_anna_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_elena", voice_elena_command))
-    telegram_app.add_handler(CommandHandler("voiceelena", voice_elena_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_arina", voice_arina_command))
-    telegram_app.add_handler(CommandHandler("voicearina", voice_arina_command))  # БЕЗ подчеркивания
-    # Yandex SpeechKit голоса
-    telegram_app.add_handler(CommandHandler("voice_jane", voice_jane_command))
-    telegram_app.add_handler(CommandHandler("voicejane", voice_jane_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_alena", voice_alena_command))
-    telegram_app.add_handler(CommandHandler("voicealena", voice_alena_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_filipp", voice_filipp_command))
-    telegram_app.add_handler(CommandHandler("voicefilipp", voice_filipp_command))  # БЕЗ подчеркивания
+    telegram_app.add_handler(CommandHandler("voice_artem", voice_artem_command))
+    telegram_app.add_handler(CommandHandler("voiceartem", voice_artem_command))  # БЕЗ подчеркивания
+    
+    # Женские голоса
+    telegram_app.add_handler(CommandHandler("voice_svetlana", voice_svetlana_command))
+    telegram_app.add_handler(CommandHandler("voicesvetlana", voice_svetlana_command))  # БЕЗ подчеркивания
+    telegram_app.add_handler(CommandHandler("voice_darya", voice_darya_command))
+    telegram_app.add_handler(CommandHandler("voicedarya", voice_darya_command))  # БЕЗ подчеркивания
+    telegram_app.add_handler(CommandHandler("voice_polina", voice_polina_command))
+    telegram_app.add_handler(CommandHandler("voicepolina", voice_polina_command))  # БЕЗ подчеркивания
 
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
@@ -1715,7 +1378,7 @@ async def main():
         logger.error(f"Error clearing webhook: {e}")
     
     # Запуск веб сервера
-    await start_web_server()
+    web_server = await start_web_server()
     
     # Запуск бота
     if is_production:
@@ -1740,6 +1403,7 @@ async def main():
     
     # Ожидаем бесконечно
     await asyncio.Event().wait()
+    return web_server
 
 if __name__ == '__main__':
     asyncio.run(main()) 
