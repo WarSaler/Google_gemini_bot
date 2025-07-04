@@ -1,127 +1,73 @@
 #!/bin/bash
 
-echo "🔧 Installing Piper TTS..."
+echo "🔧 Installing Piper TTS via pip..."
 
-# Проверяем необходимые команды
-if ! command -v wget &> /dev/null; then
-    echo "❌ wget not found, installing..."
-    apt-get update && apt-get install -y wget
+# Проверяем наличие pip
+if ! command -v pip &> /dev/null; then
+    echo "❌ pip not found"
+    exit 1
 fi
 
-# Определяем архитектуру
-ARCH=$(uname -m)
-if [[ "$ARCH" == "x86_64" ]]; then
-    PIPER_ARCH="amd64"
-elif [[ "$ARCH" == "aarch64" ]]; then
-    PIPER_ARCH="arm64"
-else
-    PIPER_ARCH="amd64"  # fallback
-fi
-
-echo "📱 Detected architecture: $ARCH -> $PIPER_ARCH"
-
-# Создаем директории
-mkdir -p piper_tts
-mkdir -p piper_tts/voices
-
-# Проверяем, не установлен ли уже Piper
-if [ ! -f "piper_tts/piper/piper" ]; then
-    echo "📦 Downloading Piper TTS..."
-    
-    # Загружаем Piper
-    PIPER_URL="https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_${PIPER_ARCH}.tar.gz"
-    echo "🔗 URL: $PIPER_URL"
-    
-    wget -v "$PIPER_URL" -O "piper_linux_${PIPER_ARCH}.tar.gz"
-    
-    if [ $? -eq 0 ]; then
-        echo "📂 Extracting Piper TTS..."
-        ls -la "piper_linux_${PIPER_ARCH}.tar.gz"
-        tar -xzf "piper_linux_${PIPER_ARCH}.tar.gz" -C piper_tts
-        
-        echo "📁 Contents of piper_tts after extraction:"
-        ls -la piper_tts/
-        
-        # Найдем исполняемый файл piper
-        PIPER_EXEC=$(find piper_tts -name "piper" -type f)
-        if [ -n "$PIPER_EXEC" ]; then
-            echo "🎯 Found piper executable at: $PIPER_EXEC"
-            chmod +x "$PIPER_EXEC"
-        else
-            echo "❌ Piper executable not found after extraction"
-            echo "📁 Full directory structure:"
-            find piper_tts -type f
-            exit 1
-        fi
-        
-        # Удаляем архив
-        rm "piper_linux_${PIPER_ARCH}.tar.gz"
-        
-        echo "✅ Piper TTS installed successfully!"
-    else
-        echo "❌ Failed to download Piper TTS"
+# Устанавливаем Piper TTS через pip
+echo "📦 Installing piper-tts package..."
+pip install piper-tts==1.2.0 || {
+    echo "⚠️ Failed to install piper-tts 1.2.0, trying latest version..."
+    pip install piper-tts || {
+        echo "❌ Failed to install piper-tts"
         exit 1
-    fi
+    }
+}
+
+# Создаем директорию для голосовых моделей
+echo "📁 Creating voice models directory..."
+mkdir -p /app/piper_tts/voices
+
+# Скачиваем русские голосовые модели
+echo "🗣️ Downloading Russian voice models..."
+
+# Дмитрий (мужской голос)
+echo "⬇️ Downloading Dmitri voice model..."
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx" \
+    -O "/app/piper_tts/voices/ru_RU-dmitri-medium.onnx" || echo "⚠️ Failed to download Dmitri model"
+
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json" \
+    -O "/app/piper_tts/voices/ru_RU-dmitri-medium.onnx.json" || echo "⚠️ Failed to download Dmitri config"
+
+# Руслан (мужской голос)
+echo "⬇️ Downloading Ruslan voice model..."
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/ruslan/medium/ru_RU-ruslan-medium.onnx" \
+    -O "/app/piper_tts/voices/ru_RU-ruslan-medium.onnx" || echo "⚠️ Failed to download Ruslan model"
+
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/ruslan/medium/ru_RU-ruslan-medium.onnx.json" \
+    -O "/app/piper_tts/voices/ru_RU-ruslan-medium.onnx.json" || echo "⚠️ Failed to download Ruslan config"
+
+# Ирина (женский голос)
+echo "⬇️ Downloading Irina voice model..."
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx" \
+    -O "/app/piper_tts/voices/ru_RU-irina-medium.onnx" || echo "⚠️ Failed to download Irina model"
+
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json" \
+    -O "/app/piper_tts/voices/ru_RU-irina-medium.onnx.json" || echo "⚠️ Failed to download Irina config"
+
+# Анна (женский голос) 
+echo "⬇️ Downloading Anna voice model..."
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/anna/medium/ru_RU-anna-medium.onnx" \
+    -O "/app/piper_tts/voices/ru_RU-anna-medium.onnx" || echo "⚠️ Failed to download Anna model"
+
+wget -T 30 -q --show-progress "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ru/ru_RU/anna/medium/ru_RU-anna-medium.onnx.json" \
+    -O "/app/piper_tts/voices/ru_RU-anna-medium.onnx.json" || echo "⚠️ Failed to download Anna config"
+
+# Проверяем успешность установки
+echo "🔍 Checking piper installation..."
+if python -c "import piper.voice; print('Piper TTS installed successfully')" 2>/dev/null; then
+    echo "✅ Piper TTS installed successfully"
 else
-    echo "✅ Piper TTS already installed"
+    echo "❌ Piper TTS installation verification failed"
+    exit 1
 fi
 
-# Загружаем русские голоса
-echo "🎤 Downloading Russian voices..."
+# Показываем установленные голоса
+echo "📋 Installed voice models:"
+ls -la /app/piper_tts/voices/*.onnx 2>/dev/null | wc -l | awk '{print "🗣️ Found " $1 " voice models"}'
 
-# Создаем список голосов для скачивания (мужские и женские)
-declare -A VOICES=(
-    ["ru_RU-dmitri-medium"]="dmitri/medium"        # Мужской голос
-    ["ru_RU-ruslan-medium"]="ruslan/medium"        # Мужской голос  
-    ["ru_RU-irina-medium"]="irina/medium"          # Женский голос
-    ["ru_RU-anna-medium"]="anna/medium"            # Женский голос
-)
-
-for voice_name in "${!VOICES[@]}"; do
-    voice_path="${VOICES[$voice_name]}"
-    
-    if [ ! -f "piper_tts/voices/${voice_name}.onnx" ]; then
-        echo "📥 Downloading ${voice_name} voice..."
-        
-        # URL для голосовой модели
-        model_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/${voice_path}/${voice_name}.onnx"
-        config_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/${voice_path}/${voice_name}.onnx.json"
-        
-        # Скачиваем модель и конфиг
-        wget_success=true
-        wget -q --timeout=60 "$model_url" -O "piper_tts/voices/${voice_name}.onnx" || wget_success=false
-        wget -q --timeout=60 "$config_url" -O "piper_tts/voices/${voice_name}.onnx.json" || wget_success=false
-        
-        if [ "$wget_success" = true ] && [ -f "piper_tts/voices/${voice_name}.onnx" ] && [ -f "piper_tts/voices/${voice_name}.onnx.json" ]; then
-            echo "✅ ${voice_name} downloaded successfully"
-        else
-            echo "❌ Failed to download ${voice_name}"
-            # Удаляем частично скачанные файлы
-            rm -f "piper_tts/voices/${voice_name}.onnx" "piper_tts/voices/${voice_name}.onnx.json"
-        fi
-    else
-        echo "✅ ${voice_name} already exists"
-    fi
-done
-
-echo "🧪 Testing Piper TTS..."
-
-# Тестируем Piper
-PIPER_EXEC=$(find piper_tts -name "piper" -type f | head -1)
-if [ -n "$PIPER_EXEC" ] && [ -f "piper_tts/voices/ru_RU-dmitri-medium.onnx" ]; then
-    echo "🧪 Testing Piper TTS with Dmitri voice..."
-    echo "Привет! Это тест Piper TTS." | "$PIPER_EXEC" --model piper_tts/voices/ru_RU-dmitri-medium.onnx --output_file test_piper.wav
-    
-    if [ -f "test_piper.wav" ]; then
-        echo "✅ Piper TTS test successful!"
-        rm test_piper.wav
-    else
-        echo "❌ Piper TTS test failed"
-    fi
-else
-    echo "❌ Piper executable or voice models not found"
-    echo "📁 Available voices:"
-    ls -la piper_tts/voices/ 2>/dev/null || echo "No voices directory"
-fi
-
-echo "🎉 Piper TTS setup complete!" 
+echo "🎉 Piper TTS installation complete!" 

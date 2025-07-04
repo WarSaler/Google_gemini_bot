@@ -4,6 +4,7 @@ import asyncio
 import base64
 import re
 import tempfile
+import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import Dict, List, Optional
@@ -427,10 +428,10 @@ class GeminiBot:
                 engine_info = VOICE_ENGINES.get(engine)
                 if engine_info and "voice_model" in engine_info:
                     voice_model = engine_info["voice_model"]
-                    return await self._piper_synthesize(text, language, voice_model)
+                    return await self._piper_synthesize(text, voice_model)
                 else:
                     # Fallback к Дмитрию если модель не найдена
-                    return await self._piper_synthesize(text, language, "ru_RU-dmitri-medium")
+                    return await self._piper_synthesize(text, "ru_RU-dmitri-medium")
             else:
                 # Fallback к gTTS
                 logger.warning(f"Engine {engine} not available, falling back to gTTS")
@@ -471,117 +472,61 @@ class GeminiBot:
             logger.error(f"Error in gTTS synthesis: {e}")
             return None
 
-    async def _piper_synthesize(self, text: str, language: str, voice_model: str = "ru_RU-dmitri-medium") -> Optional[bytes]:
-        """Синтез с помощью Piper TTS"""
+    async def _piper_synthesize(self, text: str, voice_model: str = "ru_RU-dmitri-medium") -> Optional[bytes]:
+        """Синтез с помощью Piper TTS (pip version)"""
         try:
-            # Ищем исполняемый файл Piper
-            piper_path = None
-            possible_paths = [
-                "piper_tts/piper/piper",
-                "piper_tts/piper",
-            ]
+            import io
+            import wave
+            from piper.voice import PiperVoice
             
-            # Поиск исполняемого файла
-            for path in possible_paths:
-                if os.path.exists(path):
-                    piper_path = path
-                    break
+            # Определяем модель голоса
+            if not voice_model:
+                voice_model = "ru_RU-dmitri-medium"
             
-            # Если не найден - ищем через find
-            if not piper_path:
-                try:
-                    import subprocess
-                    result = subprocess.run(
-                        ["find", "piper_tts", "-name", "piper", "-type", "f"],
-                        capture_output=True, text=True, timeout=10
-                    )
-                    if result.returncode == 0 and result.stdout.strip():
-                        piper_path = result.stdout.strip().split('\n')[0]
-                except:
-                    pass
+            model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
+            config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
             
-            if not piper_path:
-                logger.warning("Piper executable not found anywhere, using gTTS fallback")
-                return await self._gtts_synthesize(text, language, slow=False)
-            
-            # Выбираем модель голоса
-            if language == "ru":
-                # Используем переданную модель
-                model_path = f"piper_tts/voices/{voice_model}.onnx"
-                
-                # Если модель не найдена, пробуем fallback модели
-                if not os.path.exists(model_path):
-                    fallback_models = [
-                        "piper_tts/voices/ru_RU-dmitri-medium.onnx",
-                        "piper_tts/voices/ru_RU-ruslan-medium.onnx",
-                        "piper_tts/voices/ru_RU-irina-medium.onnx",
-                        "piper_tts/voices/ru_RU-anna-medium.onnx"
-                    ]
-                    
-                    model_path = None
-                    for fallback in fallback_models:
-                        if os.path.exists(fallback):
-                            model_path = fallback
-                            logger.info(f"Using fallback model: {fallback}")
-                            break
-                            
-                    if not model_path:
-                        logger.warning("No Piper voice models found, using gTTS fallback")
-                        return await self._gtts_synthesize(text, language, slow=False)
-            else:
-                # Для других языков используем gTTS
-                logger.warning(f"Piper TTS doesn't support language {language}, using gTTS fallback")
-                return await self._gtts_synthesize(text, language, slow=False)
-            
-            logger.info(f"Using Piper at: {piper_path}")
-            logger.info(f"Using voice model: {model_path}")
-            
-            # Создаем временный файл для вывода
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            try:
-                # Запускаем Piper через subprocess
-                import subprocess
-                import asyncio
-                
-                cmd = [piper_path, "--model", model_path, "--output_file", temp_path]
-                
-                # Асинхронно запускаем процесс
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                # Отправляем текст в stdin
-                stdout, stderr = await process.communicate(input=text.encode('utf-8'))
-                
-                if process.returncode == 0 and os.path.exists(temp_path):
-                    # Читаем сгенерированный аудио файл
-                    with open(temp_path, 'rb') as audio_file:
-                        audio_bytes = audio_file.read()
-                    
-                    logger.info(f"Piper TTS synthesis success: generated {len(audio_bytes)} bytes")
-                    return audio_bytes
+            # Проверяем существование файлов модели
+            if not os.path.exists(model_path) or not os.path.exists(config_path):
+                logger.warning(f"Voice model {voice_model} not found, using fallback")
+                # Попробуем найти любую доступную модель
+                voices_dir = "/app/piper_tts/voices"
+                if os.path.exists(voices_dir):
+                    onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
+                    if onnx_files:
+                        fallback_model = onnx_files[0].replace('.onnx', '')
+                        model_path = f"{voices_dir}/{fallback_model}.onnx"
+                        config_path = f"{voices_dir}/{fallback_model}.onnx.json"
+                        logger.info(f"Using fallback model: {fallback_model}")
+                    else:
+                        raise Exception("No voice models found")
                 else:
-                    logger.error(f"Piper TTS failed: {stderr.decode()}")
-                    logger.error(f"Piper stdout: {stdout.decode()}")
-                    return await self._gtts_synthesize(text, language, slow=False)
-                    
-            finally:
-                # Очищаем временный файл
-                try:
-                    if os.path.exists(temp_path):
-                        os.unlink(temp_path)
-                except:
-                    pass
-                    
+                    raise Exception("Voices directory not found")
+            
+            # Загружаем голосовую модель
+            voice = PiperVoice.load(model_path, config_path)
+            
+            # Синтезируем речь
+            audio_bytes = io.BytesIO()
+            wav_file = wave.open(audio_bytes, 'wb')
+            
+            # Настройки WAV файла
+            wav_file.setnchannels(1)  # моно
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(voice.config.sample_rate)
+            
+            # Синтезируем и записываем аудио
+            for audio_chunk in voice.synthesize_stream(text):
+                wav_file.writeframes(audio_chunk)
+            
+            wav_file.close()
+            audio_bytes.seek(0)
+            
+            return audio_bytes.getvalue()
+            
         except Exception as e:
-            logger.error(f"Error in Piper TTS synthesis: {e}")
-            # Fallback к gTTS
-            return await self._gtts_synthesize(text, language, slow=False)
+            logger.error(f"Piper TTS synthesis error: {e}")
+            return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений"""
@@ -1043,57 +988,93 @@ async def start_web_server():
     logger.info(f"Web server started on port {PORT}")
     logger.info(f"Routes: {[route.resource.canonical for route in app.router.routes()]}")
 
-async def setup_piper_if_needed():
-    """Установка Piper TTS если нужно"""
+def setup_piper_if_needed():
+    """Устанавливает Piper TTS если не установлен"""
     global PIPER_AVAILABLE
     
     try:
-        # Проверяем, установлен ли Piper
-        piper_installed = False
+        # Проверяем доступность piper через pip
+        import piper.voice
+        logger.info("Piper TTS already available")
+        PIPER_AVAILABLE = True
+        return True
+    except ImportError:
+        logger.info("Piper TTS not found, installing...")
+        result = subprocess.run(['bash', 'install_piper.sh'], 
+                              capture_output=True, text=True, cwd='/app')
         
-        # Проверяем несколько возможных путей
-        possible_paths = [
-            "piper_tts/piper/piper",
-            "piper_tts/piper"
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                piper_installed = True
-                logger.info(f"Piper TTS found at: {path}")
-                break
-        
-        if not piper_installed:
-            logger.info("Piper TTS not found, installing...")
-            
-            # Создаем директорию если не существует
-            os.makedirs("piper_tts", exist_ok=True)
-            
-            # Запускаем установочный скрипт
-            import subprocess
-            result = subprocess.run(["bash", "install_piper.sh"], 
-                                  capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0:
-                logger.info("Piper TTS installed successfully")
-                logger.info(f"Installation output: {result.stdout}")
+        if result.returncode == 0:
+            logger.info("Piper TTS installation successful")
+            logger.info(f"Installation stdout: {result.stdout}")
+            try:
+                import piper.voice
                 PIPER_AVAILABLE = True
-            else:
-                logger.error(f"Piper TTS installation failed: {result.stderr}")
-                logger.error(f"Installation stdout: {result.stdout}")
+                return True
+            except ImportError:
+                logger.error("Piper TTS import failed after installation")
                 PIPER_AVAILABLE = False
+                return False
         else:
-            logger.info("Piper TTS already installed")
-            PIPER_AVAILABLE = True
+            logger.error(f"Piper TTS installation failed: {result.stderr}")
+            logger.error(f"Installation stdout: {result.stdout}")
+            PIPER_AVAILABLE = False
+            return False
+
+def _piper_synthesize(text, voice_model=None):
+    """Синтез речи с помощью Piper TTS (pip version)"""
+    try:
+        import io
+        import wave
+        from piper.voice import PiperVoice
         
-        # Обновляем настройки движков
-        initialize_voice_engines()
-        logger.info(f"Piper TTS availability: {PIPER_AVAILABLE}")
-            
+        # Определяем модель голоса
+        if not voice_model:
+            voice_model = "ru_RU-dmitri-medium"
+        
+        model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
+        config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
+        
+        # Проверяем существование файлов модели
+        if not os.path.exists(model_path) or not os.path.exists(config_path):
+            logger.warning(f"Voice model {voice_model} not found, using fallback")
+            # Попробуем найти любую доступную модель
+            voices_dir = "/app/piper_tts/voices"
+            if os.path.exists(voices_dir):
+                onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
+                if onnx_files:
+                    fallback_model = onnx_files[0].replace('.onnx', '')
+                    model_path = f"{voices_dir}/{fallback_model}.onnx"
+                    config_path = f"{voices_dir}/{fallback_model}.onnx.json"
+                    logger.info(f"Using fallback model: {fallback_model}")
+                else:
+                    raise Exception("No voice models found")
+            else:
+                raise Exception("Voices directory not found")
+        
+        # Загружаем голосовую модель
+        voice = PiperVoice.load(model_path, config_path)
+        
+        # Синтезируем речь
+        audio_bytes = io.BytesIO()
+        wav_file = wave.open(audio_bytes, 'wb')
+        
+        # Настройки WAV файла
+        wav_file.setnchannels(1)  # моно
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(voice.config.sample_rate)
+        
+        # Синтезируем и записываем аудио
+        for audio_chunk in voice.synthesize_stream(text):
+            wav_file.writeframes(audio_chunk)
+        
+        wav_file.close()
+        audio_bytes.seek(0)
+        
+        return audio_bytes.getvalue()
+        
     except Exception as e:
-        logger.error(f"Error setting up Piper TTS: {e}")
-        PIPER_AVAILABLE = False
-        initialize_voice_engines()
+        logger.error(f"Piper TTS synthesis error: {e}")
+        return None
 
 async def main():
     """Основная функция"""
@@ -1112,7 +1093,10 @@ async def main():
         
     # Устанавливаем Piper TTS если необходимо
     if os.environ.get('RENDER'):
-        await setup_piper_if_needed()
+        if setup_piper_if_needed():
+            # Переинициализируем движки после установки Piper
+            initialize_voice_engines()
+            logger.info("Voice engines reinitialized after Piper setup")
     
     # Создание приложения
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
