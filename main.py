@@ -475,8 +475,7 @@ class GeminiBot:
     async def _piper_synthesize(self, text: str, voice_model: str = "ru_RU-dmitri-medium") -> Optional[bytes]:
         """Синтез с помощью Piper TTS (pip version)"""
         try:
-            import io
-            import wave
+            import tempfile
             from piper.voice import PiperVoice
             
             # Определяем модель голоса
@@ -506,23 +505,27 @@ class GeminiBot:
             # Загружаем голосовую модель
             voice = PiperVoice.load(model_path, config_path)
             
-            # Синтезируем речь
-            audio_bytes = io.BytesIO()
-            wav_file = wave.open(audio_bytes, 'wb')
+            # Создаем временный файл для результата
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_path = temp_file.name
             
-            # Настройки WAV файла
-            wav_file.setnchannels(1)  # моно
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(voice.config.sample_rate)
-            
-            # Синтезируем и записываем аудио
-            for audio_chunk in voice.synthesize_stream(text):
-                wav_file.writeframes(audio_chunk)
-            
-            wav_file.close()
-            audio_bytes.seek(0)
-            
-            return audio_bytes.getvalue()
+            try:
+                # Синтезируем речь напрямую в файл
+                voice.synthesize(text, temp_path)
+                
+                # Читаем результат из файла
+                with open(temp_path, 'rb') as audio_file:
+                    audio_bytes = audio_file.read()
+                
+                logger.info(f"Piper TTS synthesis success: generated {len(audio_bytes)} bytes")
+                return audio_bytes
+                
+            finally:
+                # Очистка временного файла
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
             
         except Exception as e:
             logger.error(f"Piper TTS synthesis error: {e}")
@@ -1058,62 +1061,6 @@ def setup_piper_if_needed():
             return False
     
     return True
-
-def _piper_synthesize(text, voice_model=None):
-    """Синтез речи с помощью Piper TTS (pip version)"""
-    try:
-        import io
-        import wave
-        from piper.voice import PiperVoice
-        
-        # Определяем модель голоса
-        if not voice_model:
-            voice_model = "ru_RU-dmitri-medium"
-        
-        model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
-        config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
-        
-        # Проверяем существование файлов модели
-        if not os.path.exists(model_path) or not os.path.exists(config_path):
-            logger.warning(f"Voice model {voice_model} not found, using fallback")
-            # Попробуем найти любую доступную модель
-            voices_dir = "/app/piper_tts/voices"
-            if os.path.exists(voices_dir):
-                onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
-                if onnx_files:
-                    fallback_model = onnx_files[0].replace('.onnx', '')
-                    model_path = f"{voices_dir}/{fallback_model}.onnx"
-                    config_path = f"{voices_dir}/{fallback_model}.onnx.json"
-                    logger.info(f"Using fallback model: {fallback_model}")
-                else:
-                    raise Exception("No voice models found")
-            else:
-                raise Exception("Voices directory not found")
-        
-        # Загружаем голосовую модель
-        voice = PiperVoice.load(model_path, config_path)
-        
-        # Синтезируем речь
-        audio_bytes = io.BytesIO()
-        wav_file = wave.open(audio_bytes, 'wb')
-        
-        # Настройки WAV файла
-        wav_file.setnchannels(1)  # моно
-        wav_file.setsampwidth(2)  # 16-bit
-        wav_file.setframerate(voice.config.sample_rate)
-        
-        # Синтезируем и записываем аудио
-        for audio_chunk in voice.synthesize_stream(text):
-            wav_file.writeframes(audio_chunk)
-        
-        wav_file.close()
-        audio_bytes.seek(0)
-        
-        return audio_bytes.getvalue()
-        
-    except Exception as e:
-        logger.error(f"Piper TTS synthesis error: {e}")
-        return None
 
 async def main():
     """Основная функция"""
