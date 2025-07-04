@@ -311,7 +311,7 @@ class GeminiBot:
             commands_message += "/voicealena - Alena (женский)\n"
             commands_message += "/voicefilipp - Filipp (мужской)\n\n"
         
-        commands_message += "💡 *Примечание:* Команды работают и с подчеркиванием (/voice_ruslan) и без (/voiceruslan)"
+        commands_message += "💡 Команды работают и с подчеркиванием (/voice_ruslan) и без (/voiceruslan)"
         
         # Отправляем сообщения отдельно чтобы избежать лимитов
         await update.message.reply_text(message, parse_mode='Markdown')
@@ -1227,8 +1227,9 @@ class GeminiBot:
                 # Получение оставшихся запросов
                 remaining_minute, remaining_day = self.get_remaining_requests(user_id)
                 
-                # Проверка настроек голосовых ответов пользователя
-                if voice_settings[user_id]:
+                # ГОЛОСОВЫЕ СООБЩЕНИЯ ВСЕГДА ОТВЕЧАЮТ ГОЛОСОМ (если есть выбранный движок)
+                selected_engine = voice_engine_settings.get(user_id, DEFAULT_VOICE_ENGINE)
+                if VOICE_ENGINES[selected_engine]["available"]:
                     # Генерация голосового ответа - заменяем предыдущее служебное сообщение
                     await self.send_service_message(update, context, "🎵 Генерирую голосовой ответ...", user_id)
                     
