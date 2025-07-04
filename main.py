@@ -73,9 +73,12 @@ class GeminiBot:
 /limits - Показать лимиты запросов
 
 🔄 Как пользоваться:
-• Отправьте текстовое сообщение для получения ответа
-• Отправьте изображение для анализа
-• Бот автоматически ищет актуальную информацию при необходимости
+• 💬 Отправьте текстовое сообщение для получения ответа
+• 🖼️ Отправьте изображение для анализа
+• 📰 Бот автоматически ищет актуальную информацию при необходимости
+
+❌ Не поддерживается:
+• 🎤 Голосовые сообщения (пока не реализовано)
 
 ⚡ Лимиты: 10 запросов в минуту, 250 в день"""
         
@@ -471,6 +474,66 @@ class GeminiBot:
             logger.error(f"Error processing photo: {e}")
             await update.message.reply_text("Произошла ошибка при обработке изображения.")
 
+    async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка голосовых сообщений"""
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        
+        user_id = update.message.from_user.id
+        
+        if not self.can_make_request(user_id):
+            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+            await update.message.reply_text(
+                f"⚠️ Превышен лимит запросов.\n"
+                f"🕐 Осталось в минуте: {remaining_minute}\n"
+                f"📅 Осталось сегодня: {remaining_day}"
+            )
+            return
+            
+        self.add_request(user_id)
+        
+        try:
+            # Получаем голосовое сообщение
+            voice = update.message.voice
+            file = await context.bot.get_file(voice.file_id)
+            
+            # Скачиваем аудио файл
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file.file_path) as response:
+                    if response.status == 200:
+                        audio_data = await response.read()
+                        
+                        # Кодируем в base64
+                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                        
+                        # Отправляем в Gemini для обработки
+                        headers = {'Content-Type': 'application/json'}
+                        data = {
+                            "contents": [
+                                {
+                                    "parts": [
+                                        {"text": "Пользователь отправил голосовое сообщение. К сожалению, я не могу обрабатывать аудио напрямую. Попросите пользователя отправить текстовое сообщение или изображение."},
+                                    ]
+                                }
+                            ]
+                        }
+                        
+                        # Простой ответ без обработки аудио
+                        response = "🎤 Извините, я пока не могу обрабатывать голосовые сообщения.\n\n" \
+                                 "Пожалуйста, отправьте ваш вопрос текстом или изображением.\n\n" \
+                                 "Доступные форматы:\n" \
+                                 "• 💬 Текстовые сообщения\n" \
+                                 "• 🖼️ Изображения для анализа\n" \
+                                 "• 📰 Поиск новостей\n" \
+                                 "• 💰 Курсы валют"
+                        
+                        await self.safe_send_message(update, response)
+                    else:
+                        await update.message.reply_text("Не удалось скачать голосовое сообщение.")
+                        
+        except Exception as e:
+            logger.error(f"Error processing voice: {e}")
+            await update.message.reply_text("Произошла ошибка при обработке голосового сообщения.")
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"Exception: {context.error}")
@@ -545,6 +608,7 @@ async def main():
     telegram_app.add_handler(CommandHandler("limits", bot.limits_command))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
+    telegram_app.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
     telegram_app.add_error_handler(error_handler)
     
     # Определяем окружение
