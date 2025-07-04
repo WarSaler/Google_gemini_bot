@@ -56,7 +56,7 @@ voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолча
 # Голосовые настройки - будут инициализированы в initialize_voice_engines()
 voice_engine_settings: Dict[int, str] = defaultdict(str)  # Будет установлен позже
 VOICE_ENGINES: Dict[str, dict] = {}  # Будет заполнен в initialize_voice_engines()
-DEFAULT_VOICE_ENGINE = "azure_svetlana"  # Будет установлен в initialize_voice_engines()
+DEFAULT_VOICE_ENGINE = "azure_dmitri"  # Будет установлен в initialize_voice_engines()
 
 # Хранилище служебных сообщений для автоудаления
 user_service_messages: Dict[int, List[int]] = defaultdict(list)  # user_id -> [message_id, ...]
@@ -109,7 +109,7 @@ def initialize_voice_engines():
     
     # Обновляем дефолтные настройки голоса для новых пользователей
     global voice_engine_settings, DEFAULT_VOICE_ENGINE
-    default_engine = "azure_svetlana"  # Azure по умолчанию
+    default_engine = "azure_dmitri"  # Azure Дмитрий по умолчанию
     DEFAULT_VOICE_ENGINE = default_engine
     voice_engine_settings = defaultdict(lambda: default_engine)
     
@@ -659,14 +659,9 @@ class GeminiBot:
             gender = 'Male' if voice in male_voices else 'Female'
             logger.info(f"Using Azure voice {voice} with gender {gender}")
             
-            # Создаем SSML для Azure Speech
-            ssml = f"""
-            <speak version='1.0' xml:lang='ru-RU'>
-                <voice xml:lang='ru-RU' xml:gender='{gender}' name='{voice}'>
-                    {text}
-                </voice>
-            </speak>
-            """
+            # Создаем SSML для Azure Speech с правильным форматированием
+            # Важно: убираем лишние пробелы и переносы строк внутри XML
+            ssml = f"""<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="ru-RU"><voice name="{voice}">{text}</voice></speak>"""
             
             headers = {
                 'Ocp-Apim-Subscription-Key': azure_api_key,
