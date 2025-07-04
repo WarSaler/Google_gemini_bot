@@ -92,7 +92,12 @@ def initialize_voice_engines():
             "available": PIPER_AVAILABLE,
             "voice_model": "ru_RU-irina-medium"
         },
-
+        "piper_anna": {
+            "name": "Piper TTS - Анна",
+            "description": "Высокое качество, женский голос (Анна)",
+            "available": PIPER_AVAILABLE,
+            "voice_model": "ru_RU-anna-medium"
+        }
     }
 
 # Инициализируем движки
@@ -212,7 +217,8 @@ class GeminiBot:
         if PIPER_AVAILABLE:
             message += "/voice_dmitri - Piper TTS (Дмитрий, мужской)\n"
             message += "/voice_ruslan - Piper TTS (Руслан, мужской)\n"
-            message += "/voice_irina - Piper TTS (Ирина, женский)"
+            message += "/voice_irina - Piper TTS (Ирина, женский)\n"
+            message += "/voice_anna - Piper TTS (Анна, женский)"
         
         await update.message.reply_text(message)
 
@@ -477,44 +483,52 @@ class GeminiBot:
             if not voice_model:
                 voice_model = "ru_RU-dmitri-medium"
             
-            # Список проверенных рабочих моделей (в порядке приоритета)
+            # Список всех доступных моделей (в порядке приоритета для fallback)
             working_models = [
-                "ru_RU-irina-medium",    # Женский голос, работает
-                "ru_RU-dmitri-medium",   # Мужской голос, работает  
-                "ru_RU-ruslan-medium",   # Мужской голос, работает
+                voice_model,             # Сначала пробуем запрошенную модель
+                "ru_RU-irina-medium",    # Женский голос, резерв
+                "ru_RU-dmitri-medium",   # Мужской голос, резерв  
+                "ru_RU-ruslan-medium",   # Мужской голос, резерв
+                "ru_RU-anna-medium",     # Женский голос, резерв
             ]
             
-            # Если запрошенная модель anna (которая часто падает), используем irina
-            if voice_model == "ru_RU-anna-medium":
-                logger.info(f"Replacing problematic model {voice_model} with ru_RU-irina-medium")
-                voice_model = "ru_RU-irina-medium"
+            # Убираем дубликаты, сохраняя порядок
+            seen = set()
+            working_models = [x for x in working_models if not (x in seen or seen.add(x))]
             
             # Обновленные пути для новой структуры (используем абсолютные пути)
             model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
             config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
             
-            # Проверяем существование файла модели И конфигурации
-            if not os.path.exists(model_path) or not os.path.exists(config_path):
-                logger.warning(f"Voice model {voice_model} or config not found, using fallback")
+            # Ищем первую рабочую модель из списка (включая запрошенную)
+            voices_dir = "/app/piper_tts/voices"
+            final_voice_model = None
+            final_model_path = None
+            
+            if os.path.exists(voices_dir):
+                for test_model in working_models:
+                    test_model_path = f"/app/piper_tts/voices/{test_model}.onnx"
+                    test_config_path = f"/app/piper_tts/voices/{test_model}.onnx.json"
+                    
+                    if os.path.exists(test_model_path) and os.path.exists(test_config_path):
+                        final_voice_model = test_model
+                        final_model_path = test_model_path
+                        if test_model == voice_model:
+                            logger.info(f"Using requested voice model: {voice_model}")
+                        else:
+                            logger.info(f"Using fallback voice model: {test_model} (requested: {voice_model})")
+                        break
                 
-                # Ищем рабочую модель из проверенного списка
-                voices_dir = "/app/piper_tts/voices"
-                if os.path.exists(voices_dir):
-                    for working_model in working_models:
-                        test_model_path = f"/app/piper_tts/voices/{working_model}.onnx"
-                        test_config_path = f"/app/piper_tts/voices/{working_model}.onnx.json"
-                        
-                        if os.path.exists(test_model_path) and os.path.exists(test_config_path):
-                            voice_model = working_model
-                            model_path = test_model_path
-                            logger.info(f"Using fallback voice model: {voice_model}")
-                            break
-                    else:
-                        logger.error("No working voice models found with both .onnx and .onnx.json files")
-                        return None
-                else:
-                    logger.error("Voices directory not found")
+                if not final_voice_model:
+                    logger.error("No working voice models found with both .onnx and .onnx.json files")
                     return None
+            else:
+                logger.error("Voices directory not found")
+                return None
+            
+            # Используем найденную модель
+            voice_model = final_voice_model
+            model_path = final_model_path
             
             # Проверяем наличие исполняемого файла piper в новых путях
             piper_executable = None
@@ -558,6 +572,13 @@ class GeminiBot:
                 temp_path = temp_file.name
             
             try:
+                # Для очень длинных текстов используем gTTS для быстроты
+                if len(text) > 800:
+                    logger.info(f"Text is very long ({len(text)} chars), using gTTS for speed")
+                    return await self._gtts_synthesize(text, "ru", slow=False)
+                elif len(text) > 500:
+                    logger.info(f"Text is long ({len(text)} chars), may take more time to synthesize")
+                
                 # Запускаем Piper TTS через командную строку
                 logger.info(f"Running Piper TTS with model: {model_path}")
                 
@@ -569,7 +590,7 @@ class GeminiBot:
                 ]
                 
                 logger.info(f"Running command: {' '.join(cmd)}")
-                logger.info(f"Text to synthesize: {text[:50]}...")
+                logger.info(f"Text to synthesize: {text[:50]}... (total: {len(text)} chars)")
                 
                 # Запускаем процесс
                 process = subprocess.Popen(
@@ -581,8 +602,8 @@ class GeminiBot:
                     cwd="/app"  # Устанавливаем рабочую директорию
                 )
                 
-                # Отправляем текст на stdin
-                stdout, stderr = process.communicate(input=text, timeout=30)
+                # Отправляем текст на stdin (увеличиваем таймаут до 60 секунд)
+                stdout, stderr = process.communicate(input=text, timeout=60)
                 
                 logger.info(f"Piper process completed with return code: {process.returncode}")
                 if stdout:
@@ -1230,6 +1251,7 @@ async def main():
     telegram_app.add_handler(CommandHandler("voice_dmitri", lambda u, c: bot.set_voice_engine_command(u, c, "piper_dmitri")))
     telegram_app.add_handler(CommandHandler("voice_ruslan", lambda u, c: bot.set_voice_engine_command(u, c, "piper_ruslan")))
     telegram_app.add_handler(CommandHandler("voice_irina", lambda u, c: bot.set_voice_engine_command(u, c, "piper_irina")))
+    telegram_app.add_handler(CommandHandler("voice_anna", lambda u, c: bot.set_voice_engine_command(u, c, "piper_anna")))
 
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
