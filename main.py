@@ -29,6 +29,7 @@ try:
     from gtts import gTTS
     import tempfile
     import speech_recognition as sr
+    from pydub import AudioSegment
     
     VOICE_FEATURES_AVAILABLE = True
     logger.info("Voice features available")
@@ -217,49 +218,42 @@ class GeminiBot:
         current_engine = voice_engine_settings.get(user_id, DEFAULT_VOICE_ENGINE)
         current_info = VOICE_ENGINES.get(current_engine, VOICE_ENGINES["gtts"])
         
-        message = f"🎵 **Текущий голос:** {current_info['name']}\n\n"
-        message += "🎤 **Доступные голосовые движки:**\n\n"
+        message = f"🎵 Текущий голос: {current_info['name']}\n\n"
+        message += "🎤 Доступные голосовые движки:\n\n"
         
         # Google TTS
-        gtts_engines = []
+        message += "🌐 Google TTS:\n"
         for engine_id, info in VOICE_ENGINES.items():
             if info["available"] and engine_id.startswith("gtts"):
                 marker = " ✅" if engine_id == current_engine else ""
-                gtts_engines.append(f"• {info['name']}{marker}\n  {info['description']}")
+                message += f"• {info['name']}{marker}\n"
+                message += f"  {info['description']}\n\n"
         
         # Azure Speech Services - мужские голоса
-        azure_male_engines = []
+        message += "👨 Azure Speech - Мужские голоса:\n"
         for engine_id, info in VOICE_ENGINES.items():
             if info["available"] and engine_id.startswith("azure_") and any(male in info['name'] for male in ['Дмитрий', 'Артём']):
                 marker = " ✅" if engine_id == current_engine else ""
-                azure_male_engines.append(f"• {info['name']}{marker}\n  {info['description']}")
+                message += f"• {info['name']}{marker}\n"
+                message += f"  {info['description']}\n\n"
         
         # Azure Speech Services - женские голоса
-        azure_female_engines = []
+        message += "👩 Azure Speech - Женские голоса:\n"
         for engine_id, info in VOICE_ENGINES.items():
             if info["available"] and engine_id.startswith("azure_") and any(female in info['name'] for female in ['Светлана', 'Дарья', 'Полина']):
                 marker = " ✅" if engine_id == current_engine else ""
-                azure_female_engines.append(f"• {info['name']}{marker}\n  {info['description']}")
+                message += f"• {info['name']}{marker}\n"
+                message += f"  {info['description']}\n\n"
         
-        if gtts_engines:
-            message += "🌐 *Google TTS:*\n" + "\n".join(gtts_engines) + "\n\n"
-            
-        if azure_male_engines:
-            message += "👨 *Azure Speech - Мужские голоса:*\n" + "\n".join(azure_male_engines) + "\n\n"
-            
-        if azure_female_engines:
-            message += "👩 *Azure Speech - Женские голоса:*\n" + "\n".join(azure_female_engines) + "\n\n"
-        
-        # Команды для быстрого выбора (отправляем отдельным сообщением чтобы избежать лимита)  
-        commands_message = "📝 **Команды для выбора голоса:**\n\n"
-        commands_message += "**Google TTS:**\n"
+        # Команды для быстрого выбора
+        commands_message = "📝 Команды для выбора голоса:\n\n"
+        commands_message += "🌐 Google TTS:\n"
         commands_message += "/voicegtts - Google TTS\n\n"
         
-        commands_message += "**Azure Speech Services:**\n"
-        commands_message += "👨 Мужские голоса:\n"
+        commands_message += "👨 Azure - Мужские голоса:\n"
         commands_message += "/voicedmitri - Дмитрий (реалистичный)\n"
         commands_message += "/voiceartem - Артём (естественный)\n\n"
-        commands_message += "👩 Женские голоса:\n"
+        commands_message += "👩 Azure - Женские голоса:\n"
         commands_message += "/voicesvetlana - Светлана (реалистичный)\n"
         commands_message += "/voicedarya - Дарья (естественный)\n"
         commands_message += "/voicepolina - Полина (мягкий)\n\n"
@@ -267,8 +261,8 @@ class GeminiBot:
         commands_message += "💡 Команды работают и с подчеркиванием (/voice_dmitri) и без (/voicedmitri)"
         
         # Отправляем сообщения отдельно чтобы избежать лимитов
-        await update.message.reply_text(message, parse_mode='Markdown')
-        await update.message.reply_text(commands_message, parse_mode='Markdown')
+        await update.message.reply_text(message)
+        await update.message.reply_text(commands_message)
 
     async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
         """Установка голосового движка"""
