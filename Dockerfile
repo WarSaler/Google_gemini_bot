@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     wget \
     curl \
+    sox \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование файлов зависимостей
