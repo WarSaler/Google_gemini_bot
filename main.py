@@ -143,15 +143,22 @@ class GeminiBot:
     async def call_gemini_api(self, messages: List[dict]) -> Optional[str]:
         """Вызов Gemini API"""
         try:
+            # Добавляем информацию о текущей дате
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            system_message = f"ВАЖНО: Сегодня {current_date} год. При расчете возраста людей используй эту дату."
+            
             headers = {
                 'Content-Type': 'application/json',
             }
+            
+            # Создаем список сообщений с системным сообщением
+            all_messages = [{"role": "system", "content": system_message}] + messages
             
             data = {
                 "contents": [
                     {
                         "parts": [
-                            {"text": msg["content"]} for msg in messages
+                            {"text": msg["content"]} for msg in all_messages
                         ]
                     }
                 ]
@@ -223,7 +230,8 @@ class GeminiBot:
         """Проверка, нужны ли актуальные данные"""
         keywords = [
             'новости', 'сегодня', 'сейчас', 'актуальн', 'свеж', 'последн',
-            'курс', 'цена', 'стоимость', 'погода', 'текущ', 'политическ'
+            'курс', 'цена', 'стоимость', 'погода', 'текущ', 'политическ',
+            'сколько лет', 'возраст', 'лет', 'годы', 'года'
         ]
         query_lower = query.lower()
         return any(keyword in query_lower for keyword in keywords)
@@ -238,6 +246,8 @@ class GeminiBot:
                 return await self.search_currency_rates(query)
             elif any(word in query.lower() for word in ['погода']):
                 return await self.search_weather_data(query)
+            elif any(word in query.lower() for word in ['сколько лет', 'возраст', 'лет']):
+                return await self.handle_age_query(query)
             else:
                 # Общий поиск
                 return await self.search_duckduckgo(query)
@@ -346,6 +356,35 @@ class GeminiBot:
     async def search_weather_data(self, query: str) -> Optional[str]:
         """Поиск погоды"""
         return await self.search_duckduckgo(f"погода {query}")
+
+    async def handle_age_query(self, query: str) -> Optional[str]:
+        """Обработка запросов о возрасте с актуальной датой"""
+        try:
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            current_year = datetime.now().year
+            
+            # Создаем промпт с актуальной датой
+            age_prompt = f"""ВАЖНАЯ ИНФОРМАЦИЯ: Сегодня {current_date} ({current_year} год).
+            
+Пользователь спрашивает: {query}
+
+При расчете возраста используй ТОЛЬКО текущий {current_year} год. 
+Например, если человек родился в 1971 году, то в {current_year} году ему {current_year - 1971} лет.
+
+Отвечай точно и кратко, указывая текущий возраст на {current_year} год."""
+
+            # Отправляем в Gemini с актуальной датой
+            messages = [{"role": "user", "content": age_prompt}]
+            response = await self.call_gemini_api(messages)
+            
+            if response:
+                return response
+            else:
+                return "Не удалось рассчитать возраст."
+                
+        except Exception as e:
+            logger.error(f"Age query error: {e}")
+            return "Ошибка при обработке запроса о возрасте."
 
     async def safe_send_message(self, update: Update, response: str):
         """Безопасная отправка сообщения"""
