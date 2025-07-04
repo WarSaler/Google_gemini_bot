@@ -473,99 +473,117 @@ class GeminiBot:
             return None
 
     async def _piper_synthesize(self, text: str, voice_model: str = "ru_RU-dmitri-medium") -> Optional[bytes]:
-        """Синтез с помощью Piper TTS (pip version)"""
+        """Синтез с помощью Piper TTS (command-line version)"""
         try:
             import tempfile
             import os
-            import wave
-            from piper.voice import PiperVoice
+            import subprocess
             
             # Определяем модель голоса
             if not voice_model:
                 voice_model = "ru_RU-dmitri-medium"
             
             model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
-            config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
             
-            # Проверяем существование файлов модели
-            if not os.path.exists(model_path) or not os.path.exists(config_path):
+            # Проверяем существование файла модели
+            if not os.path.exists(model_path):
                 logger.warning(f"Voice model {voice_model} not found, using fallback")
                 # Попробуем найти любую доступную модель
                 voices_dir = "/app/piper_tts/voices"
                 if os.path.exists(voices_dir):
                     onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
                     if onnx_files:
-                        fallback_model = onnx_files[0].replace('.onnx', '')
-                        model_path = f"{voices_dir}/{fallback_model}.onnx"
-                        config_path = f"{voices_dir}/{fallback_model}.onnx.json"
-                        logger.info(f"Using fallback model: {fallback_model}")
+                        voice_model = onnx_files[0].replace('.onnx', '')
+                        model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
+                        logger.info(f"Using fallback voice model: {voice_model}")
                     else:
-                        raise Exception("No voice models found")
+                        logger.error("No voice models found")
+                        return None
                 else:
-                    raise Exception("Voices directory not found")
+                    logger.error("Voices directory not found")
+                    return None
             
-            logger.info(f"Loading Piper voice model: {model_path}")
+            # Проверяем наличие исполняемого файла piper
+            piper_executable = None
+            possible_paths = [
+                "/usr/local/bin/piper",
+                "/usr/bin/piper", 
+                "/app/piper",
+                "piper"
+            ]
             
-            # Загружаем голосовую модель
-            voice = PiperVoice.load(model_path, config_path)
-            logger.info(f"Voice loaded successfully, sample rate: {voice.config.sample_rate}")
+            for path in possible_paths:
+                try:
+                    result = subprocess.run([path, "--help"], 
+                                          capture_output=True, timeout=5)
+                    if result.returncode == 0:
+                        piper_executable = path
+                        logger.info(f"Found piper executable at: {path}")
+                        break
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
             
-            # Создаем временный файл для результата
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            if not piper_executable:
+                logger.error("Piper executable not found")
+                return None
+            
+            # Создаем временный файл для вывода
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
                 temp_path = temp_file.name
             
-            logger.info(f"Temporary file created: {temp_path}")
-            
             try:
-                # Синтезируем речь используя правильный API
-                logger.info(f"Starting synthesis for text: {text[:50]}...")
+                # Запускаем Piper TTS через командную строку
+                logger.info(f"Running Piper TTS with model: {model_path}")
                 
-                # Синтез через генератор аудио данных
-                audio_data = b""
-                for audio_chunk in voice.synthesize_stream(text):
-                    audio_data += audio_chunk
+                # Команда для запуска Piper
+                cmd = [
+                    piper_executable,
+                    "--model", model_path,
+                    "--output_file", temp_path
+                ]
                 
-                if not audio_data:
-                    raise Exception("No audio data generated")
+                # Запускаем процесс
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
                 
-                logger.info(f"Generated raw audio data: {len(audio_data)} bytes")
+                # Отправляем текст на stdin
+                stdout, stderr = process.communicate(input=text, timeout=30)
                 
-                # Создаем WAV файл с правильными параметрами
-                with wave.open(temp_path, 'wb') as wav_file:
-                    wav_file.setnchannels(1)  # моно
-                    wav_file.setsampwidth(2)   # 16-bit
-                    wav_file.setframerate(voice.config.sample_rate)
-                    wav_file.writeframes(audio_data)
-                
-                # Проверяем что файл создан и не пустой
-                if not os.path.exists(temp_path):
-                    raise Exception("Output file was not created")
-                
-                file_size = os.path.getsize(temp_path)
-                if file_size == 0:
-                    raise Exception("Output file is empty")
-                
-                logger.info(f"Output WAV file size: {file_size} bytes")
-                
-                # Читаем результат из файла
-                with open(temp_path, 'rb') as audio_file:
-                    wav_bytes = audio_file.read()
-                
-                logger.info(f"Piper TTS synthesis success: generated {len(wav_bytes)} bytes")
-                return wav_bytes
-                
-            finally:
-                # Очистка временного файла
-                try:
+                if process.returncode == 0:
+                    # Читаем созданный WAV файл
                     if os.path.exists(temp_path):
-                        os.unlink(temp_path)
-                        logger.debug(f"Cleaned up temporary file: {temp_path}")
-                except Exception as cleanup_error:
-                    logger.warning(f"Failed to cleanup temporary file: {cleanup_error}")
+                        with open(temp_path, 'rb') as f:
+                            audio_data = f.read()
+                        logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio")
+                        return audio_data
+                    else:
+                        logger.error("Output file was not created")
+                        return None
+                else:
+                    logger.error(f"Piper TTS failed with return code {process.returncode}")
+                    logger.error(f"Error output: {stderr}")
+                    return None
+                    
+            except subprocess.TimeoutExpired:
+                logger.error("Piper TTS synthesis timed out")
+                process.kill()
+                return None
+            except Exception as e:
+                logger.error(f"Error running Piper TTS: {e}")
+                return None
+            finally:
+                # Удаляем временный файл
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             
         except Exception as e:
             logger.error(f"Piper TTS synthesis error: {e}")
-            logger.exception("Full traceback:")
+            logger.error(f"Full traceback:", exc_info=True)
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

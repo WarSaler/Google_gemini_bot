@@ -4,5 +4,4 @@ newsapi-python==0.2.7
 beautifulsoup4==4.12.2
 gTTS==2.3.2
 pydub==0.25.1
-SpeechRecognition==3.10.0
-piper-tts==1.2.0 
+SpeechRecognition==3.10.0 
