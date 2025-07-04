@@ -372,15 +372,16 @@ class GeminiBot:
         
         return text
 
-    def smart_split_text(self, text: str, max_chars: int = 100) -> List[str]:
+    def smart_split_text(self, text: str, max_chars: int = 200) -> List[str]:
         """Умная разбивка текста на части для голосового синтеза"""
+        # Увеличиваем лимит до 200 символов для меньшего количества частей
         if len(text) <= max_chars:
             return [text]
         
         parts = []
         
-        # Сначала пробуем разбить по предложениям
-        sentences = re.split(r'[.!?]+\s*', text)
+        # Сначала пробуем разбить по предложениям (точка, восклицательный, вопросительный знак)
+        sentences = re.split(r'[.!?]+\s+', text)
         current_part = ""
         
         for sentence in sentences:
@@ -388,72 +389,76 @@ class GeminiBot:
             if not sentence:
                 continue
                 
-            # Если предложение само по себе длинное, разбиваем его
+            # Если предложение очень длинное (больше max_chars), разбиваем его
             if len(sentence) > max_chars:
                 # Сохраняем текущую часть, если есть
                 if current_part:
                     parts.append(current_part.strip())
                     current_part = ""
                 
-                # Разбиваем длинное предложение по запятым
+                # Пробуем разбить длинное предложение по запятым
                 clauses = sentence.split(',')
                 for clause in clauses:
                     clause = clause.strip()
                     if not clause:
                         continue
                         
-                    if len(current_part + clause) <= max_chars:
-                        current_part += clause + ", "
+                    # Если добавление этой части не превышает лимит, добавляем
+                    test_part = current_part + (", " if current_part else "") + clause
+                    if len(test_part) <= max_chars:
+                        current_part = test_part
                     else:
+                        # Сохраняем текущую часть и начинаем новую
                         if current_part:
-                            parts.append(current_part.rstrip(', ').strip())
-                        current_part = clause + ", "
+                            parts.append(current_part.strip())
+                        current_part = clause
                 
-                # Если предложение все еще длинное, режем по словам
+                # Если всё ещё слишком длинно, разбиваем принудительно
                 if len(current_part) > max_chars:
+                    # Принудительное разбитие по словам
                     words = current_part.split()
-                    current_part = ""
+                    temp_part = ""
                     for word in words:
-                        if len(current_part + word + " ") <= max_chars:
-                            current_part += word + " "
+                        test_part = temp_part + (" " if temp_part else "") + word
+                        if len(test_part) <= max_chars:
+                            temp_part = test_part
                         else:
-                            if current_part:
-                                parts.append(current_part.strip())
-                            current_part = word + " "
+                            if temp_part:
+                                parts.append(temp_part.strip())
+                            temp_part = word
+                    current_part = temp_part
             else:
-                # Обычное предложение
-                if len(current_part + sentence + ". ") <= max_chars:
-                    current_part += sentence + ". "
+                # Обычное предложение - пробуем добавить к текущей части
+                test_part = current_part + (". " if current_part else "") + sentence
+                if len(test_part) <= max_chars:
+                    current_part = test_part
                 else:
+                    # Сохраняем текущую часть и начинаем новую
                     if current_part:
                         parts.append(current_part.strip())
-                    current_part = sentence + ". "
+                    current_part = sentence
         
         # Добавляем последнюю часть
         if current_part:
             parts.append(current_part.strip())
         
-        # Фильтруем пустые части и слишком короткие
-        parts = [part.strip() for part in parts if part.strip() and len(part.strip()) >= 3]
-        
-        # Если после разбивки получились слишком короткие части, объединяем их
+        # Фильтруем слишком короткие части и объединяем их
         final_parts = []
-        temp_part = ""
-        
         for part in parts:
-            if len(temp_part + " " + part) <= max_chars:
-                temp_part = temp_part + " " + part if temp_part else part
+            part = part.strip()
+            if len(part) < 10:  # Очень короткие части объединяем с предыдущими
+                if final_parts and len(final_parts[-1] + " " + part) <= max_chars:
+                    final_parts[-1] = final_parts[-1] + " " + part
+                elif part:  # Если не можем объединить, всё равно добавляем
+                    final_parts.append(part)
             else:
-                if temp_part:
-                    final_parts.append(temp_part.strip())
-                temp_part = part
+                final_parts.append(part)
         
-        if temp_part:
-            final_parts.append(temp_part.strip())
-        
-        # Если все равно не получилось разбить разумно, используем простую обрезку
+        # Если ничего не получилось, возвращаем принудительно разбитый текст
         if not final_parts:
-            final_parts = [text[:max_chars] + "..."]
+            # Принудительное разбитие на части по max_chars
+            for i in range(0, len(text), max_chars):
+                final_parts.append(text[i:i + max_chars])
         
         return final_parts
 
@@ -796,41 +801,31 @@ class GeminiBot:
                 logger.error("Empty text after cleaning")
                 return None
             
-            logger.info(f"Synthesizing full Russian text: '{clean_text}' (length: {len(clean_text)})")
+            # Ограничиваем длину текста для стабильности
+            if len(clean_text) > 500:
+                clean_text = clean_text[:497] + "..."
+                logger.info(f"Text truncated to 500 characters for stability")
             
-            # ✨ РЕШЕНИЕ ИЗ ДОКУМЕНТАЦИИ: используем --output-raw + aplay
-            # Это решает проблему зависания на русских текстах
-            # echo 'текст' | piper --model model.onnx --output-raw | aplay -r 22050 -f S16_LE -t raw -
+            logger.info(f"Synthesizing Russian text: '{clean_text}' (length: {len(clean_text)})")
             
             # Создаем временный файл для результата
             wav_fd, wav_filename = tempfile.mkstemp(suffix=".wav")
             os.close(wav_fd)
             
             try:
-                # Первая команда: echo 'текст' | piper --model model.onnx --output-raw
+                # Упрощенная команда для Piper TTS с выводом в файл напрямую
+                # echo 'текст' | piper --model model.onnx --output_file output.wav
                 piper_cmd = [
                     piper_executable,
                     "--model", model_path,
-                    "--output-raw"
+                    "--output_file", wav_filename
                 ]
                 
-                # Вторая команда: aplay -r 22050 -f S16_LE -t raw - (но перенаправляем в файл)
-                # Определяем sample rate из конфига модели (обычно 22050 для русских моделей)
-                sample_rate = "22050"
-                
-                # Команда для записи raw audio в WAV файл через sox
-                sox_cmd = [
-                    "sox", "-v", "1.0", "-r", sample_rate, "-c", "1", 
-                    "-b", "16", "-e", "signed-integer", "-t", "raw", "-",
-                    "-t", "wav", wav_filename
-                ]
-                
-                logger.info(f"Using --output-raw method for Russian text synthesis")
                 logger.info(f"Piper command: {' '.join(piper_cmd)}")
-                logger.info(f"Sox command: {' '.join(sox_cmd)}")
+                logger.info(f"Input text length: {len(clean_text)} characters")
                 
-                # Запускаем Piper TTS в pipe с sox
-                piper_process = subprocess.Popen(
+                # Запускаем Piper TTS с увеличенным timeout
+                process = subprocess.Popen(
                     piper_cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -838,44 +833,27 @@ class GeminiBot:
                     text=True
                 )
                 
-                sox_process = subprocess.Popen(
-                    sox_cmd,
-                    stdin=piper_process.stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                # Закрываем stdout первого процесса в родительском процессе
-                piper_process.stdout.close()
-                
-                # Передаем текст в piper и ждем завершения
+                # Передаем текст и ждем завершения с увеличенным timeout
                 try:
-                    piper_stdout, piper_stderr = piper_process.communicate(input=clean_text, timeout=10)
-                    sox_stdout, sox_stderr = sox_process.communicate(timeout=5)
+                    stdout, stderr = process.communicate(input=clean_text, timeout=30)  # Увеличен timeout до 30 секунд
+                    return_code = process.returncode
                     
-                    piper_return_code = piper_process.returncode
-                    sox_return_code = sox_process.returncode
+                    logger.info(f"Piper process completed with return code: {return_code}")
+                    if stdout:
+                        logger.info(f"Piper stdout: {stdout}")
+                    if stderr:
+                        logger.info(f"Piper stderr: {stderr}")
                     
-                    logger.info(f"Piper return code: {piper_return_code}")
-                    logger.info(f"Sox return code: {sox_return_code}")
-                    
-                    if piper_stderr:
-                        logger.info(f"Piper stderr: {piper_stderr}")
-                    if sox_stderr:
-                        logger.info(f"Sox stderr: {sox_stderr}")
-                    
-                    if piper_return_code != 0:
-                        logger.error(f"Piper failed with return code {piper_return_code}")
-                        return None
-                        
-                    if sox_return_code != 0:
-                        logger.error(f"Sox failed with return code {sox_return_code}")
+                    if return_code != 0:
+                        logger.error(f"Piper failed with return code {return_code}")
+                        if stderr:
+                            logger.error(f"Error details: {stderr}")
                         return None
                     
                 except subprocess.TimeoutExpired:
-                    logger.error("Piper TTS timeout after 10 seconds")
-                    piper_process.kill()
-                    sox_process.kill()
+                    logger.error("Piper TTS timeout after 30 seconds")
+                    process.kill()
+                    process.wait()
                     return None
                 
                 # Проверяем результат
@@ -895,7 +873,7 @@ class GeminiBot:
                     audio_data = f.read()
                 
                 if len(audio_data) > 0:
-                    logger.info(f"✅ Successfully synthesized {len(audio_data)} bytes with --output-raw method")
+                    logger.info(f"✅ Successfully synthesized {len(audio_data)} bytes with Piper TTS")
                     return audio_data
                 else:
                     logger.error("Audio data is empty after reading file")
@@ -1337,8 +1315,8 @@ class GeminiBot:
                     # Очистка текста от markdown символов для лучшего озвучивания
                     clean_response = self.clean_text_for_speech(response)
                     
-                    # Умная разбивка длинного текста
-                    text_parts = self.smart_split_text(clean_response, max_chars=100)
+                    # Умная разбивка длинного текста с увеличенным лимитом
+                    text_parts = self.smart_split_text(clean_response, max_chars=200)
                     logger.info(f"Split text into {len(text_parts)} parts for voice synthesis")
                     
                     if len(text_parts) == 1:
