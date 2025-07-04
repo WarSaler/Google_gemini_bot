@@ -57,6 +57,9 @@ request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'min
 voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
 voice_engine_settings: Dict[int, str] = defaultdict(lambda: "piper_irina" if PIPER_AVAILABLE else "gtts")  # По умолчанию Piper Irina
 
+# Голосовой движок по умолчанию - будет инициализирован в initialize_voice_engines()
+DEFAULT_VOICE_ENGINE = "gtts"
+
 # Хранилище служебных сообщений для автоудаления
 user_service_messages: Dict[int, List[int]] = defaultdict(list)  # user_id -> [message_id, ...]
 
@@ -146,8 +149,9 @@ def initialize_voice_engines():
     }
     
     # Обновляем дефолтные настройки голоса для новых пользователей
-    global voice_engine_settings
+    global voice_engine_settings, DEFAULT_VOICE_ENGINE
     default_engine = "piper_irina" if PIPER_AVAILABLE else "gtts"
+    DEFAULT_VOICE_ENGINE = default_engine  # Добавляем глобальную переменную
     voice_engine_settings = defaultdict(lambda: default_engine)
     
     logger.info(f"Voice engines initialized. PIPER_AVAILABLE: {PIPER_AVAILABLE}")
@@ -292,21 +296,21 @@ class GeminiBot:
         if yandex_engines:
             message += "🌟 *Yandex SpeechKit - Премиум качество:*\n" + "\n".join(yandex_engines) + "\n\n"
         
-        # Команды для быстрого выбора (отправляем отдельным сообщением чтобы избежать лимита)
-        commands_message = "📝 *Команды для выбора голоса:*\n\n"
-        commands_message += "*Google TTS:*\n"
+        # Команды для быстрого выбора (отправляем отдельным сообщением чтобы избежать лимита)  
+        commands_message = "📝 Команды для выбора голоса:\n\n"
+        commands_message += "Google TTS:\n"
         commands_message += "/voicegtts - Google TTS\n"
         commands_message += "/voicegttsslow - Google TTS (медленный)\n\n"
         
         if piper_male_engines or piper_female_engines:
-            commands_message += "*Piper TTS (высокое качество):*\n"
+            commands_message += "Piper TTS (высокое качество):\n"
             commands_message += "/voicedmitri - Дмитрий (мужской)\n"
             commands_message += "/voiceruslan - Руслан (мужской)\n"
             commands_message += "/voiceirina - Ирина (женский)\n"
             commands_message += "/voiceanna - Анна (женский)\n\n"
         
         if yandex_engines:
-            commands_message += "*Yandex SpeechKit:*\n"
+            commands_message += "Yandex SpeechKit:\n"
             commands_message += "/voicejane - Jane (женский, как Алиса)\n"
             commands_message += "/voicealena - Alena (женский)\n"
             commands_message += "/voicefilipp - Filipp (мужской)\n\n"
@@ -315,7 +319,7 @@ class GeminiBot:
         
         # Отправляем сообщения отдельно чтобы избежать лимитов
         await update.message.reply_text(message, parse_mode='Markdown')
-        await update.message.reply_text(commands_message, parse_mode='Markdown')
+        await update.message.reply_text(commands_message)
 
     async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
         """Установка голосового движка"""
