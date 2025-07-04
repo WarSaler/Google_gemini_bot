@@ -7,12 +7,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import Dict, List, Optional
 import aiohttp
+from aiohttp import web
 from newsapi import NewsApiClient
 from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from keep_alive import start_server
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,6 +26,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 AI_API_KEY = os.getenv('AI_API_KEY')
 NEWS_API_KEY = os.getenv('NEWS_API_KEY')
 GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+PORT = int(os.getenv('PORT', 10000))
 
 # Лимиты запросов
 MINUTE_LIMIT = 10
@@ -34,6 +35,9 @@ DAILY_LIMIT = 250
 # Хранилище данных
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
 request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
+
+# Глобальная переменная для приложения
+telegram_app = None
 
 class GeminiBot:
     def __init__(self):
@@ -437,8 +441,39 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+# HTTP сервер и webhook
+async def health_check(request):
+    """Health check endpoint"""
+    return web.Response(text="Bot is running! Status: Active")
+
+async def webhook_handler(request):
+    """Обработчик webhook"""
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return web.Response(status=500)
+
+async def start_web_server():
+    """Запуск веб сервера"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_post('/webhook', webhook_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Web server started on port {PORT}")
+
 async def main():
     """Основная функция"""
+    global telegram_app
+    
     logger.info("Starting Gemini Telegram Bot...")
     
     if not TELEGRAM_TOKEN or not AI_API_KEY:
@@ -446,34 +481,34 @@ async def main():
         return
     
     # Создание приложения
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
     bot = GeminiBot()
     
     # Добавление обработчиков
-    application.add_handler(CommandHandler("start", bot.start_command))
-    application.add_handler(CommandHandler("help", bot.help_command))
-    application.add_handler(CommandHandler("clear", bot.clear_command))
-    application.add_handler(CommandHandler("limits", bot.limits_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
-    application.add_error_handler(error_handler)
+    telegram_app.add_handler(CommandHandler("start", bot.start_command))
+    telegram_app.add_handler(CommandHandler("help", bot.help_command))
+    telegram_app.add_handler(CommandHandler("clear", bot.clear_command))
+    telegram_app.add_handler(CommandHandler("limits", bot.limits_command))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
+    telegram_app.add_error_handler(error_handler)
     
     # Определяем окружение
     is_production = os.environ.get('RENDER') is not None
     
     # Инициализация
-    await application.initialize()
+    await telegram_app.initialize()
+    await telegram_app.start()
     
     # Очистка webhook
     try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
+        await telegram_app.bot.delete_webhook(drop_pending_updates=True)
         await asyncio.sleep(1)
     except Exception as e:
         logger.error(f"Error clearing webhook: {e}")
     
-    # Запуск HTTP сервера в фоне
-    asyncio.create_task(start_server())
-    logger.info("HTTP server started in background")
+    # Запуск веб сервера
+    await start_web_server()
     
     # Запуск бота
     if is_production:
@@ -482,37 +517,22 @@ async def main():
         logger.info(f"Setting webhook to {webhook_url}")
         
         try:
-            await application.bot.set_webhook(url=webhook_url)
-            await application.start()
-            await application.updater.start_webhook(
-                listen="0.0.0.0",
-                port=int(os.environ.get("PORT", 10000)),
-                url_path="webhook",
-                webhook_url=webhook_url
-            )
-            logger.info("Webhook started successfully")
-            
-            # Ожидаем бесконечно
-            await asyncio.Event().wait()
+            await telegram_app.bot.set_webhook(url=webhook_url)
+            logger.info("Webhook set successfully")
             
         except Exception as e:
             logger.error(f"Webhook error: {e}")
             # Fallback к поллингу
-            await application.start()
-            await application.updater.start_polling(drop_pending_updates=True)
+            await telegram_app.updater.start_polling(drop_pending_updates=True)
             logger.info("Fallback to polling")
-            
-            # Ожидаем бесконечно
-            await asyncio.Event().wait()
     else:
         # Поллинг для локальной разработки
         logger.info("Starting polling mode")
-        await application.start()
-        await application.updater.start_polling(drop_pending_updates=True)
+        await telegram_app.updater.start_polling(drop_pending_updates=True)
         logger.info("Polling started")
-        
-        # Ожидаем бесконечно
-        await asyncio.Event().wait()
+    
+    # Ожидаем бесконечно
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
     asyncio.run(main()) 
