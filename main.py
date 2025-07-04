@@ -30,8 +30,8 @@ try:
     from pydub import AudioSegment
     import speech_recognition as sr
     
-    # Пытаемся импортировать Piper TTS (но он не нужен как модуль)
-    PIPER_AVAILABLE = False  # Будет определяться динамически
+    # Piper TTS не требует Python пакет - используем исполняемый файл
+    PIPER_AVAILABLE = False  # Будет определяться динамически в setup_piper_if_needed()
     
     VOICE_FEATURES_AVAILABLE = True
     logger.info("Voice features available")
@@ -483,18 +483,19 @@ class GeminiBot:
             if not voice_model:
                 voice_model = "ru_RU-dmitri-medium"
             
-            model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
+            # Обновленные пути для новой структуры
+            model_path = f"piper_tts/voices/{voice_model}.onnx"
             
             # Проверяем существование файла модели
             if not os.path.exists(model_path):
                 logger.warning(f"Voice model {voice_model} not found, using fallback")
                 # Попробуем найти любую доступную модель
-                voices_dir = "/app/piper_tts/voices"
+                voices_dir = "piper_tts/voices"
                 if os.path.exists(voices_dir):
                     onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
                     if onnx_files:
                         voice_model = onnx_files[0].replace('.onnx', '')
-                        model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
+                        model_path = f"piper_tts/voices/{voice_model}.onnx"
                         logger.info(f"Using fallback voice model: {voice_model}")
                     else:
                         logger.error("No voice models found")
@@ -503,9 +504,10 @@ class GeminiBot:
                     logger.error("Voices directory not found")
                     return None
             
-            # Проверяем наличие исполняемого файла piper
+            # Проверяем наличие исполняемого файла piper в новых путях
             piper_executable = None
             possible_paths = [
+                "piper_tts/bin/piper/piper",  # Новая структура
                 "/usr/local/bin/piper",
                 "/usr/bin/piper", 
                 "/app/piper",
@@ -514,13 +516,15 @@ class GeminiBot:
             
             for path in possible_paths:
                 try:
-                    result = subprocess.run([path, "--help"], 
-                                          capture_output=True, timeout=5)
-                    if result.returncode == 0:
-                        piper_executable = path
-                        logger.info(f"Found piper executable at: {path}")
-                        break
-                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    if os.path.exists(path) and os.access(path, os.X_OK):
+                        # Проверяем что файл действительно работает
+                        result = subprocess.run([path, "--help"], 
+                                              capture_output=True, timeout=5)
+                        if result.returncode == 0:
+                            piper_executable = path
+                            logger.info(f"Found piper executable at: {path}")
+                            break
+                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
                     continue
             
             if not piper_executable:
@@ -1050,19 +1054,28 @@ def setup_piper_if_needed():
     """Устанавливает Piper TTS если не установлен"""
     global PIPER_AVAILABLE
     
-    # Проверяем доступность piper через pip
-    piper_installed = False
-    try:
-        import piper.voice
-        logger.info("Piper TTS already available")
-        piper_installed = True
-        PIPER_AVAILABLE = True
-    except ImportError:
-        logger.info("Piper TTS not found, will install...")
-        PIPER_AVAILABLE = False
+    # Проверяем наличие исполняемого файла Piper
+    piper_executable_available = False
+    executable_paths = [
+        "piper_tts/bin/piper/piper",
+        "/usr/local/bin/piper",
+        "/usr/bin/piper"
+    ]
+    
+    for path in executable_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            try:
+                result = subprocess.run([path, "--help"], 
+                                      capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    piper_executable_available = True
+                    logger.info(f"Piper executable found at: {path}")
+                    break
+            except:
+                continue
     
     # Проверяем наличие голосовых моделей
-    voices_dir = "/app/piper_tts/voices"
+    voices_dir = "piper_tts/voices"
     models_exist = False
     
     if os.path.exists(voices_dir):
@@ -1076,25 +1089,28 @@ def setup_piper_if_needed():
         logger.info("Voices directory not found, will create and download models")
     
     # Запускаем установочный скрипт если нужно установить Piper или скачать модели
-    if not piper_installed or not models_exist:
+    if not piper_executable_available or not models_exist:
         logger.info("Running Piper TTS installation script...")
         result = subprocess.run(['bash', 'install_piper.sh'], 
-                              capture_output=True, text=True, cwd='/app')
+                              capture_output=True, text=True)
         
         if result.returncode == 0:
             logger.info("Piper TTS installation script completed successfully")
             logger.info(f"Installation stdout: {result.stdout}")
             
-            # Проверяем установку Piper если он не был установлен
-            if not piper_installed:
-                try:
-                    import piper.voice
-                    PIPER_AVAILABLE = True
-                    logger.info("Piper TTS installed and imported successfully")
-                except ImportError:
-                    logger.error("Piper TTS import failed after installation")
-                    PIPER_AVAILABLE = False
-                    return False
+            # Проверяем исполняемый файл после установки
+            if not piper_executable_available:
+                for path in executable_paths:
+                    if os.path.exists(path) and os.access(path, os.X_OK):
+                        try:
+                            result = subprocess.run([path, "--help"], 
+                                                  capture_output=True, timeout=5)
+                            if result.returncode == 0:
+                                piper_executable_available = True
+                                logger.info(f"Piper executable installed successfully at: {path}")
+                                break
+                        except:
+                            continue
             
             # Проверяем наличие голосовых моделей
             if os.path.exists(voices_dir):
@@ -1102,18 +1118,25 @@ def setup_piper_if_needed():
                 logger.info(f"Voice models after installation: {len(onnx_files)} found")
                 if len(onnx_files) > 0:
                     logger.info(f"Available models: {onnx_files}")
+                    PIPER_AVAILABLE = True
                     return True
                 else:
                     logger.warning("No voice models found after installation")
+                    PIPER_AVAILABLE = False
                     return False
             else:
                 logger.error("Voices directory still not found after installation")
+                PIPER_AVAILABLE = False
                 return False
         else:
             logger.error(f"Piper TTS installation failed: {result.stderr}")
             logger.error(f"Installation stdout: {result.stdout}")
             PIPER_AVAILABLE = False
             return False
+    else:
+        # Piper уже установлен
+        PIPER_AVAILABLE = True
+        logger.info("Piper TTS already available")
     
     return True
 
