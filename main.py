@@ -13,37 +13,31 @@ from aiohttp import web
 from newsapi import NewsApiClient
 from bs4 import BeautifulSoup
 
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# Настройка логирования (должно быть в начале!)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # Импорты для голосовых функций
 try:
     from gtts import gTTS
     from pydub import AudioSegment
     import speech_recognition as sr
     
-    # Пытаемся импортировать Piper TTS
-    try:
-        import piper
-        PIPER_AVAILABLE = True
-        logger.info("Piper TTS available")
-    except ImportError:
-        PIPER_AVAILABLE = False
-        logger.warning("Piper TTS not available")
+    # Пытаемся импортировать Piper TTS (но он не нужен как модуль)
+    PIPER_AVAILABLE = False  # Будет определяться динамически
     
     VOICE_FEATURES_AVAILABLE = True
     logger.info("Voice features available")
 except ImportError as e:
     VOICE_FEATURES_AVAILABLE = False
     PIPER_AVAILABLE = False
-    logging.warning(f"Voice features not available: {e}")
-
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+    logger.warning(f"Voice features not available: {e}")
 
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -62,24 +56,32 @@ request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'min
 voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
 voice_engine_settings: Dict[int, str] = defaultdict(lambda: "gtts")  # По умолчанию gTTS
 
-# Доступные голосовые движки
-VOICE_ENGINES = {
-    "gtts": {
-        "name": "Google TTS",
-        "description": "Стандартный голос Google (женский)",
-        "available": VOICE_FEATURES_AVAILABLE
-    },
-    "gtts_slow": {
-        "name": "Google TTS (медленный)",
-        "description": "Более медленная речь Google (женский)",
-        "available": VOICE_FEATURES_AVAILABLE
-    },
-    "piper": {
-        "name": "Piper TTS (высокое качество)",
-        "description": "Улучшенный нейросетевой голос (мужской/женский)",
-        "available": PIPER_AVAILABLE
+# Доступные голосовые движки - инициализация после определения VOICE_FEATURES_AVAILABLE
+VOICE_ENGINES = {}
+
+def initialize_voice_engines():
+    """Инициализация голосовых движков"""
+    global VOICE_ENGINES
+    VOICE_ENGINES = {
+        "gtts": {
+            "name": "Google TTS",
+            "description": "Стандартный голос Google (женский)",
+            "available": VOICE_FEATURES_AVAILABLE
+        },
+        "gtts_slow": {
+            "name": "Google TTS (медленный)",
+            "description": "Более медленная речь Google (женский)",
+            "available": VOICE_FEATURES_AVAILABLE
+        },
+        "piper": {
+            "name": "Piper TTS (высокое качество)",
+            "description": "Улучшенный нейросетевой голос (мужской/женский)",
+            "available": PIPER_AVAILABLE
+        }
     }
-}
+
+# Инициализируем движки
+initialize_voice_engines()
 
 # Глобальная переменная для приложения
 telegram_app = None
@@ -443,17 +445,41 @@ class GeminiBot:
     async def _piper_synthesize(self, text: str, language: str) -> Optional[bytes]:
         """Синтез с помощью Piper TTS"""
         try:
-            # Проверяем наличие Piper
-            piper_path = "piper_tts/piper/piper"
-            if not os.path.exists(piper_path):
-                logger.warning("Piper TTS not found, using gTTS fallback")
+            # Ищем исполняемый файл Piper
+            piper_path = None
+            possible_paths = [
+                "piper_tts/piper/piper",
+                "piper_tts/piper",
+            ]
+            
+            # Поиск исполняемого файла
+            for path in possible_paths:
+                if os.path.exists(path):
+                    piper_path = path
+                    break
+            
+            # Если не найден - ищем через find
+            if not piper_path:
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["find", "piper_tts", "-name", "piper", "-type", "f"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        piper_path = result.stdout.strip().split('\n')[0]
+                except:
+                    pass
+            
+            if not piper_path:
+                logger.warning("Piper executable not found anywhere, using gTTS fallback")
                 return await self._gtts_synthesize(text, language, slow=False)
             
             # Выбираем модель голоса
             if language == "ru":
                 voice_models = [
-                    "piper_voices/ru_RU-dmitri-medium.onnx",
-                    "piper_voices/ru_RU-ruslan-medium.onnx"
+                    "piper_tts/voices/ru_RU-dmitri-medium.onnx",
+                    "piper_tts/voices/ru_RU-ruslan-medium.onnx"
                 ]
             else:
                 # Для других языков используем gTTS
@@ -470,6 +496,9 @@ class GeminiBot:
             if not model_path:
                 logger.warning("No Piper voice models found, using gTTS fallback")
                 return await self._gtts_synthesize(text, language, slow=False)
+            
+            logger.info(f"Using Piper at: {piper_path}")
+            logger.info(f"Using voice model: {model_path}")
             
             # Создаем временный файл для вывода
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
@@ -502,6 +531,7 @@ class GeminiBot:
                     return audio_bytes
                 else:
                     logger.error(f"Piper TTS failed: {stderr.decode()}")
+                    logger.error(f"Piper stdout: {stdout.decode()}")
                     return await self._gtts_synthesize(text, language, slow=False)
                     
             finally:
@@ -979,10 +1009,29 @@ async def start_web_server():
 
 async def setup_piper_if_needed():
     """Установка Piper TTS если нужно"""
+    global PIPER_AVAILABLE
+    
     try:
         # Проверяем, установлен ли Piper
-        if not os.path.exists("piper_tts/piper/piper"):
+        piper_installed = False
+        
+        # Проверяем несколько возможных путей
+        possible_paths = [
+            "piper_tts/piper/piper",
+            "piper_tts/piper"
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                piper_installed = True
+                logger.info(f"Piper TTS found at: {path}")
+                break
+        
+        if not piper_installed:
             logger.info("Piper TTS not found, installing...")
+            
+            # Создаем директорию если не существует
+            os.makedirs("piper_tts", exist_ok=True)
             
             # Запускаем установочный скрипт
             import subprocess
@@ -991,17 +1040,24 @@ async def setup_piper_if_needed():
             
             if result.returncode == 0:
                 logger.info("Piper TTS installed successfully")
-                global PIPER_AVAILABLE
+                logger.info(f"Installation output: {result.stdout}")
                 PIPER_AVAILABLE = True
-                # Обновляем настройки движков
-                VOICE_ENGINES["piper"]["available"] = True
             else:
                 logger.error(f"Piper TTS installation failed: {result.stderr}")
+                logger.error(f"Installation stdout: {result.stdout}")
+                PIPER_AVAILABLE = False
         else:
             logger.info("Piper TTS already installed")
+            PIPER_AVAILABLE = True
+        
+        # Обновляем настройки движков
+        initialize_voice_engines()
+        logger.info(f"Piper TTS availability: {PIPER_AVAILABLE}")
             
     except Exception as e:
         logger.error(f"Error setting up Piper TTS: {e}")
+        PIPER_AVAILABLE = False
+        initialize_voice_engines()
 
 async def main():
     """Основная функция"""

@@ -2,6 +2,12 @@
 
 echo "🔧 Installing Piper TTS..."
 
+# Проверяем необходимые команды
+if ! command -v wget &> /dev/null; then
+    echo "❌ wget not found, installing..."
+    apt-get update && apt-get install -y wget
+fi
+
 # Определяем архитектуру
 ARCH=$(uname -m)
 if [[ "$ARCH" == "x86_64" ]]; then
@@ -24,14 +30,29 @@ if [ ! -f "piper_tts/piper/piper" ]; then
     
     # Загружаем Piper
     PIPER_URL="https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_${PIPER_ARCH}.tar.gz"
-    wget -q "$PIPER_URL" -O "piper_linux_${PIPER_ARCH}.tar.gz"
+    echo "🔗 URL: $PIPER_URL"
+    
+    wget -v "$PIPER_URL" -O "piper_linux_${PIPER_ARCH}.tar.gz"
     
     if [ $? -eq 0 ]; then
         echo "📂 Extracting Piper TTS..."
+        ls -la "piper_linux_${PIPER_ARCH}.tar.gz"
         tar -xzf "piper_linux_${PIPER_ARCH}.tar.gz" -C piper_tts
         
-        # Делаем исполняемым
-        chmod +x piper_tts/piper/piper
+        echo "📁 Contents of piper_tts after extraction:"
+        ls -la piper_tts/
+        
+        # Найдем исполняемый файл piper
+        PIPER_EXEC=$(find piper_tts -name "piper" -type f)
+        if [ -n "$PIPER_EXEC" ]; then
+            echo "🎯 Found piper executable at: $PIPER_EXEC"
+            chmod +x "$PIPER_EXEC"
+        else
+            echo "❌ Piper executable not found after extraction"
+            echo "📁 Full directory structure:"
+            find piper_tts -type f
+            exit 1
+        fi
         
         # Удаляем архив
         rm "piper_linux_${PIPER_ARCH}.tar.gz"

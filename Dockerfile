@@ -17,7 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копирование исходного кода
 COPY . .
 
-# Создание пользователя для безопасности
+# Делаем install_piper.sh исполняемым
+RUN chmod +x install_piper.sh
+
+# Создание пользователя для безопасности  
 RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
 USER app
 
