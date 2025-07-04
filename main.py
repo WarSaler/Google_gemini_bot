@@ -57,6 +57,9 @@ request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'min
 voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
 voice_engine_settings: Dict[int, str] = defaultdict(lambda: "piper_irina" if PIPER_AVAILABLE else "gtts")  # По умолчанию Piper Irina
 
+# Хранилище служебных сообщений для автоудаления
+user_service_messages: Dict[int, List[int]] = defaultdict(list)  # user_id -> [message_id, ...]
+
 # Доступные голосовые движки - инициализация после определения VOICE_FEATURES_AVAILABLE
 VOICE_ENGINES = {}
 
@@ -138,17 +141,23 @@ def initialize_voice_engines():
             "yandex_voice": "filipp"
         }
     }
-
-# Инициализируем движки
-initialize_voice_engines()
+    
+    # Обновляем дефолтные настройки голоса для новых пользователей
+    global voice_engine_settings
+    default_engine = "piper_irina" if PIPER_AVAILABLE else "gtts"
+    voice_engine_settings = defaultdict(lambda: default_engine)
+    
+    logger.info(f"Voice engines initialized. PIPER_AVAILABLE: {PIPER_AVAILABLE}")
+    logger.info(f"Default voice engine: {default_engine}")
 
 # Глобальная переменная для приложения
 telegram_app = None
 
 class GeminiBot:
     def __init__(self):
+        # Инициализация NewsAPI если ключ есть
         self.news_client = NewsApiClient(api_key=NEWS_API_KEY) if NEWS_API_KEY else None
-        logger.info(f"NewsAPI initialized: {'Yes' if self.news_client else 'No'}")
+        logger.info(f"NewsAPI initialized: {'Yes' if self.news_client else 'No (missing API key)'}")
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /start"""
@@ -506,26 +515,42 @@ class GeminiBot:
             
             # Получаем выбранный пользователем движок
             engine = voice_engine_settings.get(user_id, "gtts")
+            logger.info(f"User {user_id} selected engine: {engine}")
+            logger.info(f"PIPER_AVAILABLE: {PIPER_AVAILABLE}")
             logger.debug(f"Converting text to speech with {engine}: {len(text)} characters")
             
+            # Проверяем доступность движка
+            engine_info = VOICE_ENGINES.get(engine)
+            if engine_info:
+                logger.info(f"Engine info for {engine}: name='{engine_info['name']}', available={engine_info['available']}")
+            else:
+                logger.warning(f"No engine info found for {engine}")
+            
             if engine == "gtts":
+                logger.info("Using Google TTS (standard)")
                 return await self._gtts_synthesize(text, language, slow=False)
             elif engine == "gtts_slow":
+                logger.info("Using Google TTS (slow)")
                 return await self._gtts_synthesize(text, language, slow=True)
             elif engine.startswith("piper_") and PIPER_AVAILABLE:
+                logger.info(f"Using Piper TTS with engine: {engine}")
                 # Определяем голосовую модель из настроек движка
                 engine_info = VOICE_ENGINES.get(engine)
                 if engine_info and "voice_model" in engine_info:
                     voice_model = engine_info["voice_model"]
+                    logger.info(f"Using voice model: {voice_model}")
                     return await self._piper_synthesize(text, voice_model)
                 else:
                     # Fallback к Дмитрию если модель не найдена
+                    logger.warning(f"Voice model not found for {engine}, using fallback: ru_RU-dmitri-medium")
                     return await self._piper_synthesize(text, "ru_RU-dmitri-medium")
             elif engine.startswith("yandex_"):
+                logger.info(f"Using Yandex SpeechKit with engine: {engine}")
                 # Yandex SpeechKit TTS
                 engine_info = VOICE_ENGINES.get(engine)
                 if engine_info and "yandex_voice" in engine_info:
                     yandex_voice = engine_info["yandex_voice"]
+                    logger.info(f"Using Yandex voice: {yandex_voice}")
                     return await self._yandex_synthesize(text, yandex_voice, language)
                 else:
                     # Fallback к gTTS
@@ -533,7 +558,8 @@ class GeminiBot:
                     return await self._gtts_synthesize(text, language, slow=False)
             else:
                 # Fallback к gTTS
-                logger.warning(f"Engine {engine} not available, falling back to gTTS")
+                logger.warning(f"Engine {engine} not available or not supported, falling back to gTTS")
+                logger.warning(f"Available engines: {list(VOICE_ENGINES.keys())}")
                 return await self._gtts_synthesize(text, language, slow=False)
                     
         except Exception as e:
@@ -799,41 +825,53 @@ class GeminiBot:
                 f"📅 Осталось сегодня: {remaining_day}"
             )
             return
-            
-        self.add_request(user_id)
         
         try:
-            response = None
+            # Очистка предыдущих служебных сообщений
+            await self.cleanup_service_messages(update, context, user_id)
             
-            # Проверяем, нужны ли актуальные данные
-            if self.needs_current_data(user_message):
-                response = await self.get_current_data(user_message)
-            else:
-                # Обычный запрос к Gemini
-                user_sessions[user_id].append({"role": "user", "content": user_message})
-                messages = list(user_sessions[user_id])
-                response = await self.call_gemini_api(messages)
+            # Отправляем служебное сообщение о начале обработки
+            await self.send_service_message(update, context, "💭 Думаю над ответом...", user_id)
+            
+            # Добавление сообщения пользователя в историю
+            user_sessions[user_id].append({"role": "user", "content": user_message})
+            messages = list(user_sessions[user_id])
+            
+            response = await self.call_gemini_api(messages)
+            
+            if response:
+                # Добавление запроса в счетчик
+                self.add_request(user_id)
                 
-                if response:
-                    user_sessions[user_id].append({"role": "assistant", "content": response})
-                else:
-                    response = "Извините, произошла ошибка при обработке вашего запроса. Попробуйте переформулировать вопрос или повторить его позже."
-            
-            # Гарантируем что ответ всегда есть
-            if not response or response.strip() == "":
-                response = "Извините, не удалось сформировать ответ на ваш вопрос. Попробуйте переформулировать запрос."
-            
-            # Отправляем ответ
-            await self.safe_send_message(update, response)
-            
+                # Получение оставшихся запросов
+                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+                
+                # Удаляем служебные сообщения перед отправкой ответа
+                await self.cleanup_service_messages(update, context, user_id)
+                
+                # Отправка ответа через безопасную функцию
+                full_response = f"{response}\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                await self.safe_send_message(update, full_response)
+                
+                # Добавление ответа в историю
+                user_sessions[user_id].append({"role": "assistant", "content": response})
+                
+                logger.info(f"Successfully sent response to user {user_id}: {len(response)} characters")
+            else:
+                # Fallback ответ если API не ответил
+                await self.cleanup_service_messages(update, context, user_id)
+                await update.message.reply_text(
+                    "❌ Не удалось получить ответ от ИИ.\n\n"
+                    "Попробуйте:\n"
+                    "• Переформулировать вопрос\n"
+                    "• Повторить запрос через несколько секунд\n"
+                    "• Проверить соединение с интернетом"
+                )
+                
         except Exception as e:
-            logger.error(f"Error in handle_message for user {user_id}: {e}")
-            # Гарантируем ответ даже при ошибке
-            error_response = "Произошла ошибка при обработке сообщения. Попробуйте отправить запрос еще раз или переформулировать его."
-            try:
-                await update.message.reply_text(error_response)
-            except:
-                logger.error(f"Failed to send error message to user {user_id}")
+            logger.error(f"Error handling message from user {user_id}: {e}")
+            await self.cleanup_service_messages(update, context, user_id)
+            await update.message.reply_text("❌ Произошла ошибка при обработке сообщения.")
 
     def needs_current_data(self, query: str) -> bool:
         """Проверка, нужны ли актуальные данные"""
@@ -1137,43 +1175,33 @@ class GeminiBot:
             
             logger.info(f"Downloaded voice message: {len(voice_bytes)} bytes")
             
-            # Распознавание речи
-            await update.message.reply_text("🎤 Распознаю речь...")
+            # Распознавание речи - отправляем служебное сообщение
+            await self.send_service_message(update, context, "🎤 Распознаю речь...", user_id)
+            
             transcribed_text = await self.speech_to_text(bytes(voice_bytes))
             
             if not transcribed_text:
-                await update.message.reply_text("❌ Не удалось распознать речь. Попробуйте еще раз или говорите четче.")
+                await self.cleanup_service_messages(update, context, user_id)
+                await update.message.reply_text(
+                    "❌ Не удалось распознать речь.\n\n"
+                    "Попробуйте:\n"
+                    "• Говорить четче и громче\n"
+                    "• Уменьшить фоновый шум\n"
+                    "• Записать сообщение заново"
+                )
                 return
             
-            logger.info(f"Voice transcribed for user {user_id}: {transcribed_text[:100]}...")
+            logger.info(f"Voice transcribed for user {user_id}: {transcribed_text[:50]}...")
             
-            # Отправка уведомления о том, что речь распознана
-            await update.message.reply_text(f"✅ Распознано: \"{transcribed_text}\"")
+            # Отправляем подтверждение распознавания - заменяем предыдущее служебное сообщение
+            await self.send_service_message(update, context, f"✅ Распознано: \"{transcribed_text}\"", user_id)
             
-            # Проверяем, нужны ли актуальные данные
-            if self.needs_current_data(transcribed_text):
-                await update.message.reply_text("🔍 Ищу актуальную информацию в интернете...")
-                current_info = await self.get_current_data(transcribed_text)
-                
-                if current_info:
-                    # Формируем расширенный запрос с актуальными данными
-                    enhanced_message = f"""ВАЖНАЯ ИНФОРМАЦИЯ: Сегодня {datetime.now().strftime('%d.%m.%Y')} год.
+            # Добавление сообщения пользователя в историю
+            user_sessions[user_id].append({"role": "user", "content": transcribed_text})
+            messages = list(user_sessions[user_id])
 
-Голосовой вопрос пользователя: {transcribed_text}
-
-АКТУАЛЬНАЯ ИНФОРМАЦИЯ ИЗ ИНТЕРНЕТА:
-{current_info}
-
-Используй актуальную информацию выше для ответа. Отвечай кратко и по существу на русском языке."""
-                    
-                    messages = [{"role": "user", "content": enhanced_message}]
-                else:
-                    messages = [{"role": "user", "content": transcribed_text}]
-            else:
-                messages = [{"role": "user", "content": transcribed_text}]
-
-            # Уведомление о начале обработки
-            await update.message.reply_text("💭 Думаю над ответом...")
+            # Уведомление о начале обработки - заменяем предыдущее служебное сообщение
+            await self.send_service_message(update, context, "💭 Думаю над ответом...", user_id)
             
             logger.info(f"Calling Gemini API for voice message from user {user_id}")
             response = await self.call_gemini_api(messages)
@@ -1189,46 +1217,99 @@ class GeminiBot:
                 
                 # Проверка настроек голосовых ответов пользователя
                 if voice_settings[user_id]:
-                    # Генерация голосового ответа
-                    await update.message.reply_text("🎵 Генерирую голосовой ответ...")
+                    # Генерация голосового ответа - заменяем предыдущее служебное сообщение
+                    await self.send_service_message(update, context, "🎵 Генерирую голосовой ответ...", user_id)
                     
                     # Очистка текста от markdown символов для лучшего озвучивания
                     clean_response = self.clean_text_for_speech(response)
                     
-                    # Определение языка для TTS (русский если в тексте есть кириллица, иначе английский)
-                    tts_language = "ru" if any('\u0400' <= char <= '\u04FF' for char in clean_response) else "en"
+                    logger.info(f"Synthesizing text of {len(clean_response)} characters")
+                    voice_data = await self.text_to_speech(clean_response, user_id)
                     
-                    # Синтез речи
-                    voice_bytes = await self.text_to_speech(clean_response, user_id, tts_language)
-                    
-                    if voice_bytes:
-                        try:
-                            # Отправка голосового сообщения
-                            await update.message.reply_voice(
-                                voice=BytesIO(voice_bytes),
-                                caption=f"🎤➡️🎵 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня\n\n💡 Отключить голосовые ответы: /voice"
-                            )
-                            logger.info(f"Successfully sent voice response to user {user_id}")
-                        except Exception as e:
-                            logger.error(f"Failed to send voice message to user {user_id}: {e}")
-                            # Fallback к текстовому ответу
-                            await update.message.reply_text(f"❌ Не удалось отправить голосовой ответ, вот текст:\n\n{response}")
+                    if voice_data:
+                        # Удаляем все служебные сообщения перед отправкой ответа
+                        await self.cleanup_service_messages(update, context, user_id)
+                        
+                        # Отправка голосового ответа
+                        await update.message.reply_voice(
+                            voice=BytesIO(voice_data),
+                            caption=f"🎤 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                        )
+                        logger.info(f"Successfully sent voice response to user {user_id}")
+                        
+                        # Добавление ответа в историю
+                        user_sessions[user_id].append({"role": "assistant", "content": response})
                     else:
-                        logger.error(f"Voice synthesis failed for user {user_id}")
-                        # Fallback к текстовому ответу
-                        await update.message.reply_text(f"❌ Не удалось создать голосовой ответ, вот текст:\n\n{response}")
+                        # Fallback к текстовому ответу если синтез не удался
+                        await self.cleanup_service_messages(update, context, user_id)
+                        await update.message.reply_text(
+                            f"💬 {response}\n\n"
+                            f"⚠️ Не удалось создать голосовой ответ\n"
+                            f"📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                        )
+                        
+                        # Добавление ответа в историю
+                        user_sessions[user_id].append({"role": "assistant", "content": response})
                 else:
-                    # Текстовый ответ если голосовые отключены
-                    await update.message.reply_text(f"📝 {response}\n\n💡 Включить голосовые ответы: /voice")
+                    # Текстовый ответ
+                    await self.cleanup_service_messages(update, context, user_id)
+                    await update.message.reply_text(
+                        f"💬 {response}\n\n"
+                        f"📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                    )
+                    
+                    # Добавление ответа в историю
+                    user_sessions[user_id].append({"role": "assistant", "content": response})
             else:
-                logger.error(f"No response received from Gemini API for voice message from user {user_id}")
-                # Гарантируем ответ даже если API не ответил
-                fallback_response = f"❌ Извините, не удалось обработать ваш голосовой запрос: \"{transcribed_text}\"\n\nПопробуйте:\n• Переформулировать вопрос\n• Отправить текстом\n• Повторить позже"
-                await update.message.reply_text(fallback_response)
+                await self.cleanup_service_messages(update, context, user_id)
+                await update.message.reply_text(
+                    "❌ Не удалось получить ответ от ИИ.\n\n"
+                    "Попробуйте:\n"
+                    "• Переформулировать вопрос\n"
+                    "• Повторить запрос через несколько секунд\n"
+                    "• Проверить соединение с интернетом"
+                )
                 
         except Exception as e:
-            logger.error(f"Error handling voice message from user {user_id}: {e}")
+            logger.error(f"Error processing voice message: {e}")
+            await self.cleanup_service_messages(update, context, user_id)
             await update.message.reply_text("❌ Произошла ошибка при обработке голосового сообщения.")
+
+    async def add_service_message(self, user_id: int, message_id: int):
+        """Добавляет служебное сообщение в список для автоудаления"""
+        user_service_messages[user_id].append(message_id)
+        
+    async def cleanup_service_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+        """Удаляет все накопленные служебные сообщения пользователя"""
+        try:
+            for message_id in user_service_messages[user_id]:
+                try:
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=message_id)
+                except Exception as e:
+                    logger.debug(f"Could not delete service message {message_id}: {e}")
+            
+            # Очищаем список после удаления
+            user_service_messages[user_id].clear()
+            logger.debug(f"Cleaned up service messages for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error cleaning up service messages for user {user_id}: {e}")
+            
+    async def send_service_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, user_id: int) -> Optional[int]:
+        """Отправляет служебное сообщение и добавляет его в список для автоудаления"""
+        try:
+            # Сначала удаляем предыдущие служебные сообщения
+            await self.cleanup_service_messages(update, context, user_id)
+            
+            # Отправляем новое служебное сообщение
+            message = await update.message.reply_text(text)
+            
+            # Добавляем в список для автоудаления
+            await self.add_service_message(user_id, message.message_id)
+            
+            return message.message_id
+        except Exception as e:
+            logger.error(f"Error sending service message: {e}")
+            return None
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
@@ -1389,6 +1470,10 @@ async def main():
             # Переинициализируем движки после установки Piper
             initialize_voice_engines()
             logger.info("Voice engines reinitialized after Piper setup")
+    else:
+        # Локальная разработка - просто инициализируем движки
+        initialize_voice_engines()
+        logger.info("Voice engines initialized for local development")
     
     # Создание приложения
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
