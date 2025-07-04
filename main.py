@@ -60,6 +60,9 @@ voice_engine_settings: Dict[int, str] = defaultdict(lambda: "piper_irina" if PIP
 # Хранилище служебных сообщений для автоудаления
 user_service_messages: Dict[int, List[int]] = defaultdict(list)  # user_id -> [message_id, ...]
 
+# Хранилище обработанных сообщений для предотвращения дублирования
+processed_messages: Dict[str, bool] = {}  # message_id -> processed
+
 # Доступные голосовые движки - инициализация после определения VOICE_FEATURES_AVAILABLE
 VOICE_ENGINES = {}
 
@@ -149,6 +152,10 @@ def initialize_voice_engines():
     
     logger.info(f"Voice engines initialized. PIPER_AVAILABLE: {PIPER_AVAILABLE}")
     logger.info(f"Default voice engine: {default_engine}")
+    
+    # Логируем доступные движки
+    available_engines = [engine_id for engine_id, info in VOICE_ENGINES.items() if info["available"]]
+    logger.info(f"Available voice engines: {available_engines}")
 
 # Глобальная переменная для приложения
 telegram_app = None
@@ -312,16 +319,24 @@ class GeminiBot:
         """Установка голосового движка"""
         user_id = update.effective_user.id
         
+        logger.info(f"User {user_id} trying to set voice engine: {engine}")
+        
         if engine not in VOICE_ENGINES:
+            logger.warning(f"Unknown engine {engine} requested by user {user_id}")
             await update.message.reply_text("❌ Неизвестный голосовой движок.")
             return
         
         engine_info = VOICE_ENGINES[engine]
+        logger.info(f"Engine info for {engine}: available={engine_info['available']}")
+        
         if not engine_info["available"]:
+            logger.warning(f"Engine {engine} not available for user {user_id}")
             await update.message.reply_text(f"❌ {engine_info['name']} недоступен.")
             return
         
         voice_engine_settings[user_id] = engine
+        logger.info(f"Successfully set voice engine for user {user_id}: {engine}")
+        
         await update.message.reply_text(
             f"✅ Голос успешно изменен!\n\n"
             f"🎵 Новый голос: {engine_info['name']}\n"
@@ -689,122 +704,110 @@ class GeminiBot:
             ]
             
             for path in possible_paths:
-                try:
-                    if os.path.exists(path) and os.access(path, os.X_OK):
-                        # Проверяем что файл действительно работает
-                        result = subprocess.run([path, "--help"], 
-                                              capture_output=True, timeout=5, text=True)
-                        if result.returncode == 0:
-                            piper_executable = path
-                            logger.info(f"Found piper executable at: {path}")
-                            # Логируем версию и help для отладки
-                            try:
-                                version_result = subprocess.run([path, "--version"], 
-                                                              capture_output=True, timeout=5, text=True)
-                                if version_result.returncode == 0:
-                                    logger.info(f"Piper version: {version_result.stdout.strip()}")
-                            except:
-                                logger.info("Could not get piper version")
-                            break
-                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
-                    logger.debug(f"Failed to check piper at {path}: {e}")
-                    continue
+                if os.path.exists(path) and os.access(path, os.X_OK):
+                    piper_executable = path
+                    logger.info(f"Found piper executable at: {path}")
+                    break
             
             if not piper_executable:
                 logger.error("Piper executable not found")
                 return None
             
-            # Создаем временный файл для вывода
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
+            # Проверка работоспособности
             try:
-                # Убираем ограничения - синтезируем любую длину текста
-                if len(text) > 1000:
-                    logger.info(f"Text is very long ({len(text)} chars), but will synthesize fully")
+                check_result = subprocess.run([piper_executable, "--version"], 
+                                            capture_output=True, text=True, timeout=5)
+                if check_result.returncode == 0:
+                    logger.info(f"Piper version: {check_result.stdout.strip()}")
+                else:
+                    logger.error(f"Piper version check failed: {check_result.stderr}")
+                    return None
+            except subprocess.TimeoutExpired:
+                logger.error("Piper version check timeout")
+                return None
+            except Exception as e:
+                logger.error(f"Piper version check error: {e}")
+                return None
+            
+            # Ограничиваем длину текста для ускорения синтеза
+            if len(text) > 500:
+                text = text[:500] + "..."
+                logger.info(f"Text truncated to 500 characters for faster synthesis")
+            
+            # Создание временного файла для вывода
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_filename = temp_file.name
+            
+            logger.info(f"Running Piper TTS with model: {model_path}")
+            
+            # Команда для piper с оптимизированными настройками
+            cmd = [
+                piper_executable,
+                "--model", model_path,
+                "--output_file", temp_filename,
+                "--length_scale", "1.1",  # Немного быстрее речь
+                "--noise_scale", "0.667",  # Меньше шума
+                "--noise_w", "0.8"  # Оптимизированное качество
+            ]
+            
+            logger.info(f"Running command: {' '.join(cmd)}")
+            logger.info(f"Text to synthesize: {text[:50]}... (total: {len(text)} chars)")
+            
+            # Запуск команды с timeout
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Отправляем текст на stdin и ждем результат с timeout
+            try:
+                stdout, stderr = process.communicate(input=text, timeout=30)  # 30 секунд timeout
+                return_code = process.returncode
                 
-                # Запускаем Piper TTS через командную строку
-                logger.info(f"Running Piper TTS with model: {model_path}")
-                
-                # Команда для запуска Piper (используем правильный параметр --output_file)
-                cmd = [
-                    piper_executable,
-                    "--model", model_path,
-                    "--output_file", temp_path
-                ]
-                
-                logger.info(f"Running command: {' '.join(cmd)}")
-                logger.info(f"Text to synthesize: {text[:50]}... (total: {len(text)} chars)")
-                
-                # Запускаем процесс
-                process = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd="/app"  # Устанавливаем рабочую директорию
-                )
-                
-                # Отправляем текст на stdin (без ограничений по времени для полного ответа)
-                stdout, stderr = process.communicate(input=text, timeout=300)
-                
-                logger.info(f"Piper process completed with return code: {process.returncode}")
+                logger.info(f"Piper process completed with return code: {return_code}")
                 if stdout:
                     logger.info(f"Piper stdout: {stdout}")
                 if stderr:
                     logger.info(f"Piper stderr: {stderr}")
                 
-                if process.returncode == 0:
-                    # Читаем созданный WAV файл
-                    if os.path.exists(temp_path):
-                        with open(temp_path, 'rb') as f:
-                            audio_data = f.read()
-                        logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio")
-                        return audio_data
-                    else:
-                        logger.error("Output file was not created")
-                        logger.error(f"Checked path: {temp_path}")
-                        # Проверим что есть в текущей директории
-                        try:
-                            import glob
-                            wav_files = glob.glob("*.wav")
-                            logger.info(f"WAV files in current directory: {wav_files}")
-                        except:
-                            pass
-                        return None
+                if return_code != 0:
+                    logger.error(f"Piper failed with return code {return_code}")
+                    if os.path.exists(temp_filename):
+                        os.unlink(temp_filename)
+                    return None
+                
+                # Проверяем, создался ли файл
+                if not os.path.exists(temp_filename):
+                    logger.error("Piper output file was not created")
+                    return None
+                
+                # Читаем результат
+                with open(temp_filename, 'rb') as f:
+                    audio_data = f.read()
+                
+                # Удаляем временный файл
+                os.unlink(temp_filename)
+                
+                if len(audio_data) > 0:
+                    logger.info(f"Successfully synthesized {len(audio_data)} bytes of audio")
+                    return audio_data
                 else:
-                    logger.error(f"Piper TTS failed with return code {process.returncode}")
-                    logger.error(f"Command: {' '.join(cmd)}")
-                    logger.error(f"Working directory: /app")
-                    logger.error(f"Error output: {stderr}")
-                    logger.error(f"Standard output: {stdout}")
-                    
-                    # Fallback к gTTS при ошибке Piper
-                    logger.info("Falling back to gTTS due to Piper failure")
-                    return await self._gtts_synthesize(text, "ru", slow=False)
+                    logger.error("Generated audio file is empty")
+                    return None
                     
             except subprocess.TimeoutExpired:
-                logger.error("Piper TTS synthesis timed out")
+                logger.error("Piper TTS timeout after 30 seconds")
                 process.kill()
+                process.wait()
+                if os.path.exists(temp_filename):
+                    os.unlink(temp_filename)
+                return None
                 
-                # Fallback к gTTS при таймауте
-                logger.info("Falling back to gTTS due to Piper timeout") 
-                return await self._gtts_synthesize(text, "ru", slow=False)
-            except Exception as e:
-                logger.error(f"Error running Piper TTS: {e}")
-                
-                # Fallback к gTTS при любой ошибке
-                logger.info("Falling back to gTTS due to Piper exception")
-                return await self._gtts_synthesize(text, "ru", slow=False)
-            finally:
-                # Удаляем временный файл
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            
         except Exception as e:
-            logger.error(f"Piper TTS synthesis error: {e}")
-            logger.error(f"Full traceback:", exc_info=True)
+            logger.error(f"Error in Piper TTS synthesis: {e}")
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -826,52 +829,47 @@ class GeminiBot:
             )
             return
         
-        try:
-            # Очистка предыдущих служебных сообщений
+        # Отправляем служебное сообщение о том, что думаем
+        await self.send_service_message(update, context, "💭 Думаю над ответом...", user_id)
+        
+        # Добавление сообщения пользователя в историю
+        user_sessions[user_id].append({"role": "user", "content": user_message})
+        messages = list(user_sessions[user_id])
+        
+        # Вызов API
+        response = await self.call_gemini_api(messages)
+        
+        if response:
+            logger.info(f"Received response from Gemini API for user {user_id}: {len(response)} characters")
+            
+            # Добавление запроса в счетчик
+            self.add_request(user_id)
+            
+            # Получение оставшихся запросов
+            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+            
+            # Удаляем служебное сообщение перед отправкой ответа
             await self.cleanup_service_messages(update, context, user_id)
             
-            # Отправляем служебное сообщение о начале обработки
-            await self.send_service_message(update, context, "💭 Думаю над ответом...", user_id)
+            # Для текстовых сообщений ВСЕГДА отвечаем только текстом
+            # Отправка ответа через безопасную функцию
+            full_response = f"{response}\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+            await self.safe_send_message(update, full_response)
             
-            # Добавление сообщения пользователя в историю
-            user_sessions[user_id].append({"role": "user", "content": user_message})
-            messages = list(user_sessions[user_id])
+            # Добавление ответа в историю
+            user_sessions[user_id].append({"role": "assistant", "content": response})
             
-            response = await self.call_gemini_api(messages)
-            
-            if response:
-                # Добавление запроса в счетчик
-                self.add_request(user_id)
-                
-                # Получение оставшихся запросов
-                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-                
-                # Удаляем служебные сообщения перед отправкой ответа
-                await self.cleanup_service_messages(update, context, user_id)
-                
-                # Отправка ответа через безопасную функцию
-                full_response = f"{response}\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                await self.safe_send_message(update, full_response)
-                
-                # Добавление ответа в историю
-                user_sessions[user_id].append({"role": "assistant", "content": response})
-                
-                logger.info(f"Successfully sent response to user {user_id}: {len(response)} characters")
-            else:
-                # Fallback ответ если API не ответил
-                await self.cleanup_service_messages(update, context, user_id)
-                await update.message.reply_text(
-                    "❌ Не удалось получить ответ от ИИ.\n\n"
-                    "Попробуйте:\n"
-                    "• Переформулировать вопрос\n"
-                    "• Повторить запрос через несколько секунд\n"
-                    "• Проверить соединение с интернетом"
-                )
-                
-        except Exception as e:
-            logger.error(f"Error handling message from user {user_id}: {e}")
+            logger.info(f"Successfully sent response to user {user_id}: {len(response)} characters")
+        else:
+            # Fallback ответ если API не ответил
             await self.cleanup_service_messages(update, context, user_id)
-            await update.message.reply_text("❌ Произошла ошибка при обработке сообщения.")
+            await update.message.reply_text(
+                "❌ Не удалось получить ответ от ИИ.\n\n"
+                "Попробуйте:\n"
+                "• Переформулировать вопрос\n"
+                "• Повторить запрос через несколько секунд\n"
+                "• Проверить соединение с интернетом"
+            )
 
     def needs_current_data(self, query: str) -> bool:
         """Проверка, нужны ли актуальные данные"""
@@ -1145,6 +1143,16 @@ class GeminiBot:
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка голосовых сообщений"""
         user_id = update.effective_user.id
+        message_id = f"{user_id}_{update.message.message_id}"
+        
+        # Проверка дублирования
+        if message_id in processed_messages:
+            logger.info(f"Message {message_id} already processed, skipping")
+            return
+        
+        # Отмечаем сообщение как обрабатываемое
+        processed_messages[message_id] = True
+        
         logger.info(f"Received voice message from user {user_id}")
         
         if not VOICE_FEATURES_AVAILABLE:
@@ -1274,6 +1282,13 @@ class GeminiBot:
             logger.error(f"Error processing voice message: {e}")
             await self.cleanup_service_messages(update, context, user_id)
             await update.message.reply_text("❌ Произошла ошибка при обработке голосового сообщения.")
+        
+        finally:
+            # Очистка старых записей обработанных сообщений (оставляем только последние 100)
+            if len(processed_messages) > 100:
+                old_keys = list(processed_messages.keys())[:-50]  # Удаляем старые, оставляем 50 новых
+                for key in old_keys:
+                    processed_messages.pop(key, None)
 
     async def add_service_message(self, user_id: int, message_id: int):
         """Добавляет служебное сообщение в список для автоудаления"""
