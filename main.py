@@ -372,6 +372,91 @@ class GeminiBot:
         
         return text
 
+    def smart_split_text(self, text: str, max_chars: int = 100) -> List[str]:
+        """Умная разбивка текста на части для голосового синтеза"""
+        if len(text) <= max_chars:
+            return [text]
+        
+        parts = []
+        
+        # Сначала пробуем разбить по предложениям
+        sentences = re.split(r'[.!?]+\s*', text)
+        current_part = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+                
+            # Если предложение само по себе длинное, разбиваем его
+            if len(sentence) > max_chars:
+                # Сохраняем текущую часть, если есть
+                if current_part:
+                    parts.append(current_part.strip())
+                    current_part = ""
+                
+                # Разбиваем длинное предложение по запятым
+                clauses = sentence.split(',')
+                for clause in clauses:
+                    clause = clause.strip()
+                    if not clause:
+                        continue
+                        
+                    if len(current_part + clause) <= max_chars:
+                        current_part += clause + ", "
+                    else:
+                        if current_part:
+                            parts.append(current_part.rstrip(', ').strip())
+                        current_part = clause + ", "
+                
+                # Если предложение все еще длинное, режем по словам
+                if len(current_part) > max_chars:
+                    words = current_part.split()
+                    current_part = ""
+                    for word in words:
+                        if len(current_part + word + " ") <= max_chars:
+                            current_part += word + " "
+                        else:
+                            if current_part:
+                                parts.append(current_part.strip())
+                            current_part = word + " "
+            else:
+                # Обычное предложение
+                if len(current_part + sentence + ". ") <= max_chars:
+                    current_part += sentence + ". "
+                else:
+                    if current_part:
+                        parts.append(current_part.strip())
+                    current_part = sentence + ". "
+        
+        # Добавляем последнюю часть
+        if current_part:
+            parts.append(current_part.strip())
+        
+        # Фильтруем пустые части и слишком короткие
+        parts = [part.strip() for part in parts if part.strip() and len(part.strip()) >= 3]
+        
+        # Если после разбивки получились слишком короткие части, объединяем их
+        final_parts = []
+        temp_part = ""
+        
+        for part in parts:
+            if len(temp_part + " " + part) <= max_chars:
+                temp_part = temp_part + " " + part if temp_part else part
+            else:
+                if temp_part:
+                    final_parts.append(temp_part.strip())
+                temp_part = part
+        
+        if temp_part:
+            final_parts.append(temp_part.strip())
+        
+        # Если все равно не получилось разбить разумно, используем простую обрезку
+        if not final_parts:
+            final_parts = [text[:max_chars] + "..."]
+        
+        return final_parts
+
     def clean_old_requests(self, user_id: int):
         """Очистка старых запросов"""
         now = datetime.now()
@@ -702,12 +787,6 @@ class GeminiBot:
                 logger.error(f"Piper executable not found at: {piper_executable}")
                 return None
             
-            # Ограничиваем длину текста для стабильной работы с русским языком
-            max_chars = 100  # Сокращаем лимит для русского языка
-            if len(text) > max_chars:
-                text = text[:max_chars] + "..."
-                logger.info(f"Text truncated to {max_chars} characters for Russian synthesis")
-            
             # Очистка и подготовка текста для русского языка
             clean_text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
             clean_text = ' '.join(clean_text.split())  # Убираем множественные пробелы
@@ -717,7 +796,7 @@ class GeminiBot:
                 logger.error("Empty text after cleaning")
                 return None
             
-            logger.info(f"Synthesizing Russian text: '{clean_text}' (length: {len(clean_text)})")
+            logger.info(f"Synthesizing full Russian text: '{clean_text}' (length: {len(clean_text)})")
             
             # ✨ РЕШЕНИЕ ИЗ ДОКУМЕНТАЦИИ: используем --output-raw + aplay
             # Это решает проблему зависания на русских текстах
@@ -1258,32 +1337,34 @@ class GeminiBot:
                     # Очистка текста от markdown символов для лучшего озвучивания
                     clean_response = self.clean_text_for_speech(response)
                     
-                    logger.info(f"Synthesizing text of {len(clean_response)} characters")
-                    voice_data = await self.text_to_speech(clean_response, user_id)
+                    # Умная разбивка длинного текста
+                    text_parts = self.smart_split_text(clean_response, max_chars=100)
+                    logger.info(f"Split text into {len(text_parts)} parts for voice synthesis")
                     
-                    if voice_data:
-                        # Удаляем все служебные сообщения перед отправкой ответа
-                        await self.cleanup_service_messages(update, context, user_id)
+                    if len(text_parts) == 1:
+                        # Короткий текст - отправляем одним сообщением
+                        logger.info(f"Synthesizing single part of {len(text_parts[0])} characters")
+                        voice_data = await self.text_to_speech(text_parts[0], user_id)
                         
-                        # Отправка голосового ответа
-                        await update.message.reply_voice(
-                            voice=BytesIO(voice_data),
-                            caption=f"🎤 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                        )
-                        logger.info(f"Successfully sent voice response to user {user_id}")
-                        
-                        # Добавление ответа в историю
-                        user_sessions[user_id].append({"role": "assistant", "content": response})
+                        if voice_data:
+                            await self.cleanup_service_messages(update, context, user_id)
+                            await update.message.reply_voice(
+                                voice=BytesIO(voice_data),
+                                caption=f"🎤 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                            )
+                            logger.info(f"Successfully sent single voice response to user {user_id}")
+                            user_sessions[user_id].append({"role": "assistant", "content": response})
+                        else:
+                            # Fallback к тексту
+                            await self.cleanup_service_messages(update, context, user_id)
+                            await update.message.reply_text(
+                                f"💬 {response}\n\n⚠️ Не удалось создать голосовой ответ\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                            )
+                            user_sessions[user_id].append({"role": "assistant", "content": response})
                     else:
-                        # Fallback к текстовому ответу если синтез не удался
-                        await self.cleanup_service_messages(update, context, user_id)
-                        await update.message.reply_text(
-                            f"💬 {response}\n\n"
-                            f"⚠️ Не удалось создать голосовой ответ\n"
-                            f"📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                        )
-                        
-                        # Добавление ответа в историю
+                        # Длинный текст - отправляем частями
+                        logger.info(f"Sending long response as {len(text_parts)} voice parts")
+                        await self.send_voice_parts(update, context, text_parts, user_id, remaining_minute, remaining_day)
                         user_sessions[user_id].append({"role": "assistant", "content": response})
                 else:
                     # Текстовый ответ
@@ -1316,6 +1397,53 @@ class GeminiBot:
                 old_keys = list(processed_messages.keys())[:-50]  # Удаляем старые, оставляем 50 новых
                 for key in old_keys:
                     processed_messages.pop(key, None)
+
+    async def send_voice_parts(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                              text_parts: List[str], user_id: int, remaining_minute: int, remaining_day: int):
+        """Отправляет несколько голосовых сообщений для длинного текста"""
+        
+        total_parts = len(text_parts)
+        logger.info(f"Sending {total_parts} voice parts to user {user_id}")
+        
+        for i, part in enumerate(text_parts, 1):
+            try:
+                # Генерируем голосовое сообщение для каждой части
+                await self.send_service_message(update, context, f"🎵 Генерирую часть {i}/{total_parts}...", user_id)
+                
+                voice_data = await self.text_to_speech(part, user_id)
+                
+                if voice_data:
+                    await self.cleanup_service_messages(update, context, user_id)
+                    
+                    # Caption для первого и последнего сообщения
+                    if i == 1 and total_parts > 1:
+                        caption = f"🎤 Голосовой ответ (часть {i}/{total_parts})"
+                    elif i == total_parts:
+                        caption = f"🎤 Завершение (часть {i}/{total_parts})\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                    else:
+                        caption = f"🎤 Продолжение (часть {i}/{total_parts})"
+                    
+                    await update.message.reply_voice(
+                        voice=BytesIO(voice_data),
+                        caption=caption
+                    )
+                    
+                    # Небольшая задержка между сообщениями
+                    if i < total_parts:
+                        await asyncio.sleep(0.5)
+                        
+                else:
+                    # Если синтез не удался, отправляем текстом
+                    await self.cleanup_service_messages(update, context, user_id)
+                    await update.message.reply_text(
+                        f"💬 Часть {i}/{total_parts}: {part}\n\n"
+                        f"⚠️ Не удалось создать голосовой ответ для этой части"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Error sending voice part {i}: {e}")
+                await self.cleanup_service_messages(update, context, user_id)
+                await update.message.reply_text(f"💬 Часть {i}/{total_parts}: {part}")
 
     async def add_service_message(self, user_id: int, message_id: int):
         """Добавляет служебное сообщение в список для автоудаления"""
