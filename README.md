@@ -45,6 +45,13 @@ TELEGRAM_TOKEN=8119871708:AAE-RGXTzdm_oPZzSeDH2W58QDHQAT7Gio8
 # Google Gemini AI Configuration  
 AI_API_KEY=AIzaSyDtsmdiQ6nY3t8g_VI-CsI5EKzP1ikbtvM
 
+# Optional: NewsAPI for current information
+NEWS_API_KEY=your_newsapi_key_here
+
+# Optional: Azure Speech Services for premium voices
+AZURE_SPEECH_KEY=your_azure_speech_key_here
+AZURE_SPEECH_REGION=eastus
+
 # Optional: Environment
 ENVIRONMENT=production
 ```
@@ -97,6 +104,9 @@ python main.py
 ```
 TELEGRAM_TOKEN = 8119871708:AAE-RGXTzdm_oPZzSeDH2W58QDHQAT7Gio8
 AI_API_KEY = AIzaSyDtsmdiQ6nY3t8g_VI-CsI5EKzP1ikbtvM
+NEWS_API_KEY = your_newsapi_key_here (опционально)
+AZURE_SPEECH_KEY = your_azure_speech_key_here (опционально)
+AZURE_SPEECH_REGION = eastus
 ENVIRONMENT = production
 ```
 
@@ -236,6 +246,18 @@ Google_gemini_bot/
 1. Проверьте корректность `AI_API_KEY`
 2. Убедитесь, что не превышены лимиты Google AI Studio
 3. Проверьте статус сервиса Google AI
+
+### Голосовые движки не работают (Azure)
+1. Убедитесь, что `AZURE_SPEECH_KEY` настроен корректно
+2. Проверьте, что регион `AZURE_SPEECH_REGION` соответствует вашему ресурсу
+3. Бот автоматически переключится на Google TTS при отсутствии Azure ключа
+
+### Получение Azure Speech Services API ключа
+1. Перейдите в [Azure Portal](https://portal.azure.com/)
+2. Создайте новый ресурс "Speech Services"
+3. Выберите регион (рекомендуется: East US)
+4. Скопируйте API ключ из раздела "Keys and Endpoint"
+5. Добавьте ключ в переменные среды Render
 
 ### Превышены лимиты
 - Подождите до обновления часовых/дневных лимитов

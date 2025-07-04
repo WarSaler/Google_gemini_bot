@@ -11,6 +11,12 @@ services:
         sync: false
       - key: AI_API_KEY
         sync: false
+      - key: NEWS_API_KEY
+        sync: false
+      - key: AZURE_SPEECH_KEY
+        sync: false
+      - key: AZURE_SPEECH_REGION
+        value: eastus
       - key: ENVIRONMENT
         value: production
       - key: PORT

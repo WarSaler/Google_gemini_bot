@@ -215,54 +215,36 @@ class GeminiBot:
     async def voice_select_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда выбора голосового движка"""
         user_id = update.effective_user.id
+        
+        # Текущий выбранный движок
         current_engine = voice_engine_settings.get(user_id, DEFAULT_VOICE_ENGINE)
-        current_info = VOICE_ENGINES.get(current_engine, VOICE_ENGINES["gtts"])
+        current_name = VOICE_ENGINES.get(current_engine, {}).get('name', 'Неизвестный')
         
-        message = f"🎵 Текущий голос: {current_info['name']}\n\n"
-        message += "🎤 Доступные голосовые движки:\n\n"
+        # Проверяем доступность Azure
+        azure_api_key = os.getenv('AZURE_SPEECH_KEY')
+        azure_status = "✅ Настроен" if azure_api_key else "❌ Не настроен"
         
-        # Google TTS
-        message += "🌐 Google TTS:\n"
-        for engine_id, info in VOICE_ENGINES.items():
-            if info["available"] and engine_id.startswith("gtts"):
-                marker = " ✅" if engine_id == current_engine else ""
-                message += f"• {info['name']}{marker}\n"
-                message += f"  {info['description']}\n\n"
+        voice_list = f"""🎵 Доступные голосовые движки:
+
+ТЕКУЩИЙ: {current_name}
+
+🔸 GOOGLE TTS:
+/voicegtts - Google TTS (всегда доступен, быстрый)
+
+🔸 AZURE SPEECH SERVICES ({azure_status}):
+/voicedmitri - Дмитрий (мужской)
+/voiceartem - Артём (мужской) 
+/voicesvetlana - Светлана (женский)
+/voicedarya - Дарья (женский)
+/voicepolina - Полина (женский)
+
+ℹ️ Команды также работают с подчёркиваниями:
+/voice_gtts, /voice_dmitri и т.д."""
+
+        if not azure_api_key:
+            voice_list += "\n\n⚠️ Azure движки требуют настройки API ключа AZURE_SPEECH_KEY"
         
-        # Azure Speech Services - мужские голоса
-        message += "👨 Azure Speech - Мужские голоса:\n"
-        for engine_id, info in VOICE_ENGINES.items():
-            if info["available"] and engine_id.startswith("azure_") and any(male in info['name'] for male in ['Дмитрий', 'Артём']):
-                marker = " ✅" if engine_id == current_engine else ""
-                message += f"• {info['name']}{marker}\n"
-                message += f"  {info['description']}\n\n"
-        
-        # Azure Speech Services - женские голоса
-        message += "👩 Azure Speech - Женские голоса:\n"
-        for engine_id, info in VOICE_ENGINES.items():
-            if info["available"] and engine_id.startswith("azure_") and any(female in info['name'] for female in ['Светлана', 'Дарья', 'Полина']):
-                marker = " ✅" if engine_id == current_engine else ""
-                message += f"• {info['name']}{marker}\n"
-                message += f"  {info['description']}\n\n"
-        
-        # Команды для быстрого выбора
-        commands_message = "📝 Команды для выбора голоса:\n\n"
-        commands_message += "🌐 Google TTS:\n"
-        commands_message += "/voicegtts - Google TTS\n\n"
-        
-        commands_message += "👨 Azure - Мужские голоса:\n"
-        commands_message += "/voicedmitri - Дмитрий (реалистичный)\n"
-        commands_message += "/voiceartem - Артём (естественный)\n\n"
-        commands_message += "👩 Azure - Женские голоса:\n"
-        commands_message += "/voicesvetlana - Светлана (реалистичный)\n"
-        commands_message += "/voicedarya - Дарья (естественный)\n"
-        commands_message += "/voicepolina - Полина (мягкий)\n\n"
-        
-        commands_message += "💡 Команды работают и с подчеркиванием (/voice_dmitri) и без (/voicedmitri)"
-        
-        # Отправляем сообщения отдельно чтобы избежать лимитов
-        await update.message.reply_text(message)
-        await update.message.reply_text(commands_message)
+        await update.message.reply_text(voice_list)
 
     async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
         """Установка голосового движка"""
@@ -591,7 +573,21 @@ class GeminiBot:
                 if engine_info and "azure_voice" in engine_info:
                     azure_voice = engine_info["azure_voice"]
                     logger.info(f"Using Azure voice: {azure_voice}")
-                    return await self._azure_synthesize(text, azure_voice)
+                    
+                    # Проверяем API ключ Azure
+                    azure_api_key = os.getenv('AZURE_SPEECH_KEY')
+                    if not azure_api_key:
+                        logger.warning("Azure Speech API key not configured, falling back to Google TTS")
+                        return await self._gtts_synthesize(text, language)
+                    
+                    # Пытаемся Azure
+                    azure_result = await self._azure_synthesize(text, azure_voice)
+                    if azure_result:
+                        return azure_result
+                    else:
+                        # Fallback к gTTS при ошибке Azure
+                        logger.warning(f"Azure synthesis failed for {engine}, falling back to gTTS")
+                        return await self._gtts_synthesize(text, language)
                 else:
                     # Fallback к gTTS
                     logger.warning(f"Azure voice not configured for {engine}, falling back to gTTS")
@@ -604,18 +600,24 @@ class GeminiBot:
                     
         except Exception as e:
             logger.error(f"Error in text-to-speech: {e}")
-            return None
+            # В случае любой ошибки, пытаемся gTTS
+            try:
+                logger.info("Attempting fallback to gTTS due to error")
+                return await self._gtts_synthesize(text, language)
+            except:
+                return None
 
     async def _gtts_synthesize(self, text: str, language: str) -> Optional[bytes]:
-        """Синтез с помощью Google TTS"""
+        """Оптимизированный синтез с помощью Google TTS"""
         try:
             # Создание временного файла для аудио
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
                 temp_path = temp_file.name
             
             try:
-                # Создание TTS объекта
-                tts = gTTS(text=text, lang=language)
+                # Создание TTS объекта с оптимизацией скорости
+                # slow=False делает речь быстрее
+                tts = gTTS(text=text, lang=language, slow=False)
                 
                 # Сохранение в временный файл
                 tts.save(temp_path)
