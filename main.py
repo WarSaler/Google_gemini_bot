@@ -295,21 +295,23 @@ class GeminiBot:
         # Команды для быстрого выбора (отправляем отдельным сообщением чтобы избежать лимита)
         commands_message = "📝 *Команды для выбора голоса:*\n\n"
         commands_message += "*Google TTS:*\n"
-        commands_message += "/voice_gtts - Google TTS\n"
-        commands_message += "/voice_gtts_slow - Google TTS (медленный)\n\n"
+        commands_message += "/voicegtts - Google TTS\n"
+        commands_message += "/voicegttsslow - Google TTS (медленный)\n\n"
         
         if piper_male_engines or piper_female_engines:
             commands_message += "*Piper TTS (высокое качество):*\n"
-            commands_message += "/voice_dmitri - Дмитрий (мужской)\n"
-            commands_message += "/voice_ruslan - Руслан (мужской)\n"
-            commands_message += "/voice_irina - Ирина (женский)\n"
-            commands_message += "/voice_anna - Анна (женский)\n\n"
+            commands_message += "/voicedmitri - Дмитрий (мужской)\n"
+            commands_message += "/voiceruslan - Руслан (мужской)\n"
+            commands_message += "/voiceirina - Ирина (женский)\n"
+            commands_message += "/voiceanna - Анна (женский)\n\n"
         
         if yandex_engines:
             commands_message += "*Yandex SpeechKit:*\n"
-            commands_message += "/voice_jane - Jane (женский, как Алиса)\n"
-            commands_message += "/voice_alena - Alena (женский)\n"
-            commands_message += "/voice_filipp - Filipp (мужской)"
+            commands_message += "/voicejane - Jane (женский, как Алиса)\n"
+            commands_message += "/voicealena - Alena (женский)\n"
+            commands_message += "/voicefilipp - Filipp (мужской)\n\n"
+        
+        commands_message += "💡 *Примечание:* Команды работают и с подчеркиванием (/voice_ruslan) и без (/voiceruslan)"
         
         # Отправляем сообщения отдельно чтобы избежать лимитов
         await update.message.reply_text(message, parse_mode='Markdown')
@@ -1536,20 +1538,33 @@ async def main():
     async def voice_alena_command(u, c): await bot.set_voice_engine_command(u, c, "yandex_alena")
     async def voice_filipp_command(u, c): await bot.set_voice_engine_command(u, c, "yandex_filipp")
     
+    # ДОБАВЛЯЕМ ОБРАБОТЧИКИ ДЛЯ КОМАНД С ПОДЧЕРКИВАНИЕМ И БЕЗ
     telegram_app.add_handler(CommandHandler("voice_gtts", voice_gtts_command))
+    telegram_app.add_handler(CommandHandler("voicegtts", voice_gtts_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_gtts_slow", voice_gtts_slow_command))
+    telegram_app.add_handler(CommandHandler("voicegttsslow", voice_gtts_slow_command))  # БЕЗ подчеркивания
     # Piper TTS голоса
     telegram_app.add_handler(CommandHandler("voice_dmitri", voice_dmitri_command))
+    telegram_app.add_handler(CommandHandler("voicedmitri", voice_dmitri_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_ruslan", voice_ruslan_command))
+    telegram_app.add_handler(CommandHandler("voiceruslan", voice_ruslan_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_pavel", voice_pavel_command))
+    telegram_app.add_handler(CommandHandler("voicepavel", voice_pavel_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_irina", voice_irina_command))
+    telegram_app.add_handler(CommandHandler("voiceirina", voice_irina_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_anna", voice_anna_command))
+    telegram_app.add_handler(CommandHandler("voiceanna", voice_anna_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_elena", voice_elena_command))
+    telegram_app.add_handler(CommandHandler("voiceelena", voice_elena_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_arina", voice_arina_command))
+    telegram_app.add_handler(CommandHandler("voicearina", voice_arina_command))  # БЕЗ подчеркивания
     # Yandex SpeechKit голоса
     telegram_app.add_handler(CommandHandler("voice_jane", voice_jane_command))
+    telegram_app.add_handler(CommandHandler("voicejane", voice_jane_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_alena", voice_alena_command))
+    telegram_app.add_handler(CommandHandler("voicealena", voice_alena_command))  # БЕЗ подчеркивания
     telegram_app.add_handler(CommandHandler("voice_filipp", voice_filipp_command))
+    telegram_app.add_handler(CommandHandler("voicefilipp", voice_filipp_command))  # БЕЗ подчеркивания
 
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
