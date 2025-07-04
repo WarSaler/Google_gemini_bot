@@ -55,7 +55,7 @@ DAILY_LIMIT = 250
 user_sessions: Dict[int, deque] = defaultdict(lambda: deque(maxlen=50))
 request_counts: Dict[int, Dict[str, List[datetime]]] = defaultdict(lambda: {'minute': [], 'day': []})
 voice_settings: Dict[int, bool] = defaultdict(lambda: True)  # По умолчанию голосовые ответы включены
-voice_engine_settings: Dict[int, str] = defaultdict(lambda: "gtts")  # По умолчанию gTTS
+voice_engine_settings: Dict[int, str] = defaultdict(lambda: "piper_irina" if PIPER_AVAILABLE else "gtts")  # По умолчанию Piper Irina
 
 # Доступные голосовые движки - инициализация после определения VOICE_FEATURES_AVAILABLE
 VOICE_ENGINES = {}
@@ -92,12 +92,7 @@ def initialize_voice_engines():
             "available": PIPER_AVAILABLE,
             "voice_model": "ru_RU-irina-medium"
         },
-        "piper_anna": {
-            "name": "Piper TTS - Анна",
-            "description": "Высокое качество, женский голос (Анна)",
-            "available": PIPER_AVAILABLE,
-            "voice_model": "ru_RU-anna-medium"
-        }
+
     }
 
 # Инициализируем движки
@@ -217,8 +212,7 @@ class GeminiBot:
         if PIPER_AVAILABLE:
             message += "/voice_dmitri - Piper TTS (Дмитрий, мужской)\n"
             message += "/voice_ruslan - Piper TTS (Руслан, мужской)\n"
-            message += "/voice_irina - Piper TTS (Ирина, женский)\n"
-            message += "/voice_anna - Piper TTS (Анна, женский)"
+            message += "/voice_irina - Piper TTS (Ирина, женский)"
         
         await update.message.reply_text(message)
 
@@ -483,22 +477,40 @@ class GeminiBot:
             if not voice_model:
                 voice_model = "ru_RU-dmitri-medium"
             
+            # Список проверенных рабочих моделей (в порядке приоритета)
+            working_models = [
+                "ru_RU-irina-medium",    # Женский голос, работает
+                "ru_RU-dmitri-medium",   # Мужской голос, работает  
+                "ru_RU-ruslan-medium",   # Мужской голос, работает
+            ]
+            
+            # Если запрошенная модель anna (которая часто падает), используем irina
+            if voice_model == "ru_RU-anna-medium":
+                logger.info(f"Replacing problematic model {voice_model} with ru_RU-irina-medium")
+                voice_model = "ru_RU-irina-medium"
+            
             # Обновленные пути для новой структуры (используем абсолютные пути)
             model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
+            config_path = f"/app/piper_tts/voices/{voice_model}.onnx.json"
             
-            # Проверяем существование файла модели
-            if not os.path.exists(model_path):
-                logger.warning(f"Voice model {voice_model} not found, using fallback")
-                # Попробуем найти любую доступную модель
+            # Проверяем существование файла модели И конфигурации
+            if not os.path.exists(model_path) or not os.path.exists(config_path):
+                logger.warning(f"Voice model {voice_model} or config not found, using fallback")
+                
+                # Ищем рабочую модель из проверенного списка
                 voices_dir = "/app/piper_tts/voices"
                 if os.path.exists(voices_dir):
-                    onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
-                    if onnx_files:
-                        voice_model = onnx_files[0].replace('.onnx', '')
-                        model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
-                        logger.info(f"Using fallback voice model: {voice_model}")
+                    for working_model in working_models:
+                        test_model_path = f"/app/piper_tts/voices/{working_model}.onnx"
+                        test_config_path = f"/app/piper_tts/voices/{working_model}.onnx.json"
+                        
+                        if os.path.exists(test_model_path) and os.path.exists(test_config_path):
+                            voice_model = working_model
+                            model_path = test_model_path
+                            logger.info(f"Using fallback voice model: {voice_model}")
+                            break
                     else:
-                        logger.error("No voice models found")
+                        logger.error("No working voice models found with both .onnx and .onnx.json files")
                         return None
                 else:
                     logger.error("Voices directory not found")
@@ -602,15 +614,24 @@ class GeminiBot:
                     logger.error(f"Working directory: /app")
                     logger.error(f"Error output: {stderr}")
                     logger.error(f"Standard output: {stdout}")
-                    return None
+                    
+                    # Fallback к gTTS при ошибке Piper
+                    logger.info("Falling back to gTTS due to Piper failure")
+                    return await self._gtts_synthesize(text, "ru", slow=False)
                     
             except subprocess.TimeoutExpired:
                 logger.error("Piper TTS synthesis timed out")
                 process.kill()
-                return None
+                
+                # Fallback к gTTS при таймауте
+                logger.info("Falling back to gTTS due to Piper timeout") 
+                return await self._gtts_synthesize(text, "ru", slow=False)
             except Exception as e:
                 logger.error(f"Error running Piper TTS: {e}")
-                return None
+                
+                # Fallback к gTTS при любой ошибке
+                logger.info("Falling back to gTTS due to Piper exception")
+                return await self._gtts_synthesize(text, "ru", slow=False)
             finally:
                 # Удаляем временный файл
                 if os.path.exists(temp_path):
@@ -1209,7 +1230,7 @@ async def main():
     telegram_app.add_handler(CommandHandler("voice_dmitri", lambda u, c: bot.set_voice_engine_command(u, c, "piper_dmitri")))
     telegram_app.add_handler(CommandHandler("voice_ruslan", lambda u, c: bot.set_voice_engine_command(u, c, "piper_ruslan")))
     telegram_app.add_handler(CommandHandler("voice_irina", lambda u, c: bot.set_voice_engine_command(u, c, "piper_irina")))
-    telegram_app.add_handler(CommandHandler("voice_anna", lambda u, c: bot.set_voice_engine_command(u, c, "piper_anna")))
+
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
     telegram_app.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
