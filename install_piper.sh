@@ -44,12 +44,17 @@ echo "📋 Найдено $EXISTING_MODELS существующих голосо
 
 echo "🗣️ Скачивание русских голосовых моделей с Hugging Face..."
 
-# Массив для всех русских моделей (включая Anna)
+# Расширенный массив голосовых моделей - добавляем больше качественных женских голосов
 declare -a MODELS=(
+    # Оригинальные модели
     "ru_RU-dmitri-medium"
     "ru_RU-ruslan-medium" 
     "ru_RU-irina-medium"
     "ru_RU-anna-medium"
+    # Новые качественные модели (high quality)
+    "ru_RU-elena-medium"
+    "ru_RU-arina-high"
+    "ru_RU-pavel-medium"
 )
 
 # Базовый URL для моделей на Hugging Face (версия v1.0.0)
@@ -75,6 +80,15 @@ download_model() {
             ;;
         "ru_RU-anna-medium")
             voice_path="ru/ru_RU/anna/medium"
+            ;;
+        "ru_RU-elena-medium")
+            voice_path="ru/ru_RU/elena/medium"
+            ;;
+        "ru_RU-arina-high")
+            voice_path="ru/ru_RU/arina/high"
+            ;;
+        "ru_RU-pavel-medium")
+            voice_path="ru/ru_RU/pavel/medium"
             ;;
         *)
             echo "⚠️ Неизвестная модель: $model_name"

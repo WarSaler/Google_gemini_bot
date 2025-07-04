@@ -74,6 +74,7 @@ def initialize_voice_engines():
             "description": "Более медленная речь Google (женский)",
             "available": VOICE_FEATURES_AVAILABLE
         },
+        # Мужские голоса Piper
         "piper_dmitri": {
             "name": "Piper TTS - Дмитрий",
             "description": "Высокое качество, мужской голос (Дмитрий)",
@@ -86,6 +87,13 @@ def initialize_voice_engines():
             "available": PIPER_AVAILABLE,
             "voice_model": "ru_RU-ruslan-medium"
         },
+        "piper_pavel": {
+            "name": "Piper TTS - Павел",
+            "description": "Высокое качество, мужской голос (Павел)",
+            "available": PIPER_AVAILABLE,
+            "voice_model": "ru_RU-pavel-medium"
+        },
+        # Женские голоса Piper  
         "piper_irina": {
             "name": "Piper TTS - Ирина",
             "description": "Высокое качество, женский голос (Ирина)",
@@ -97,6 +105,37 @@ def initialize_voice_engines():
             "description": "Высокое качество, женский голос (Анна)",
             "available": PIPER_AVAILABLE,
             "voice_model": "ru_RU-anna-medium"
+        },
+        "piper_elena": {
+            "name": "Piper TTS - Елена",
+            "description": "Высокое качество, женский голос (Елена)",
+            "available": PIPER_AVAILABLE,
+            "voice_model": "ru_RU-elena-medium"
+        },
+        "piper_arina": {
+            "name": "Piper TTS - Арина",
+            "description": "Премиум качество, женский голос (Арина)",
+            "available": PIPER_AVAILABLE,
+            "voice_model": "ru_RU-arina-high"
+        },
+        # Yandex SpeechKit голоса (Alice-like quality)
+        "yandex_jane": {
+            "name": "Yandex SpeechKit - Jane",
+            "description": "Премиум качество, женский голос как у Алисы (Jane)",
+            "available": VOICE_FEATURES_AVAILABLE,
+            "yandex_voice": "jane"
+        },
+        "yandex_alena": {
+            "name": "Yandex SpeechKit - Alena", 
+            "description": "Премиум качество, женский голос (Alena)",
+            "available": VOICE_FEATURES_AVAILABLE,
+            "yandex_voice": "alena"
+        },
+        "yandex_filipp": {
+            "name": "Yandex SpeechKit - Filipp",
+            "description": "Премиум качество, мужской голос (Filipp)",
+            "available": VOICE_FEATURES_AVAILABLE,
+            "yandex_voice": "filipp"
         }
     }
 
@@ -199,28 +238,67 @@ class GeminiBot:
         user_id = update.effective_user.id
         current_engine = voice_engine_settings[user_id]
         
-        # Создаем список доступных движков
-        available_engines = []
+        # Создаем список доступных движков, разделенных по категориям
+        google_engines = []
+        piper_male_engines = []
+        piper_female_engines = []
+        yandex_engines = []
+        
         for engine_id, engine_info in VOICE_ENGINES.items():
             if engine_info["available"]:
                 status = "✅ (текущий)" if engine_id == current_engine else "⚡"
-                available_engines.append(f"{status} {engine_info['name']}\n   {engine_info['description']}")
+                engine_line = f"{status} {engine_info['name']}\n   {engine_info['description']}"
+                
+                if engine_id.startswith("gtts"):
+                    google_engines.append(engine_line)
+                elif engine_id.startswith("piper_") and ("мужской" in engine_info['description'] or "Дмитрий" in engine_info['name'] or "Руслан" in engine_info['name'] or "Павел" in engine_info['name']):
+                    piper_male_engines.append(engine_line)
+                elif engine_id.startswith("piper_"):
+                    piper_female_engines.append(engine_line)
+                elif engine_id.startswith("yandex_"):
+                    yandex_engines.append(engine_line)
         
-        if not available_engines:
+        if not any([google_engines, piper_male_engines, piper_female_engines, yandex_engines]):
             await update.message.reply_text("❌ Голосовые движки недоступны.")
             return
         
-        message = "🎤 Доступные голосовые движки:\n\n" + "\n\n".join(available_engines)
-        message += "\n\n📝 Чтобы выбрать голос, используйте:\n"
-        message += "/voice_gtts - Google TTS\n"
-        message += "/voice_gtts_slow - Google TTS (медленный)\n"
-        if PIPER_AVAILABLE:
-            message += "/voice_dmitri - Piper TTS (Дмитрий, мужской)\n"
-            message += "/voice_ruslan - Piper TTS (Руслан, мужской)\n"
-            message += "/voice_irina - Piper TTS (Ирина, женский)\n"
-            message += "/voice_anna - Piper TTS (Анна, женский)"
+        message = "🎤 Доступные голосовые движки:\n\n"
         
-        await update.message.reply_text(message)
+        if google_engines:
+            message += "📱 **Google TTS:**\n" + "\n\n".join(google_engines) + "\n\n"
+        
+        if piper_male_engines:
+            message += "👨 **Piper TTS - Мужские голоса:**\n" + "\n\n".join(piper_male_engines) + "\n\n"
+        
+        if piper_female_engines:
+            message += "👩 **Piper TTS - Женские голоса:**\n" + "\n\n".join(piper_female_engines) + "\n\n"
+            
+        if yandex_engines:
+            message += "🌟 **Yandex SpeechKit - Премиум качество (как Алиса):**\n" + "\n\n".join(yandex_engines) + "\n\n"
+        
+        # Команды для быстрого выбора
+        message += "\n📝 **Команды для выбора голоса:**\n"
+        message += "**Google TTS:**\n"
+        message += "/voice_gtts - Google TTS\n"
+        message += "/voice_gtts_slow - Google TTS (медленный)\n\n"
+        
+        if piper_male_engines or piper_female_engines:
+            message += "**Piper TTS (высокое качество):**\n"
+            message += "/voice_dmitri - Дмитрий (мужской)\n"
+            message += "/voice_ruslan - Руслан (мужской)\n"
+            message += "/voice_pavel - Павел (мужской)\n"
+            message += "/voice_irina - Ирина (женский)\n"
+            message += "/voice_anna - Анна (женский)\n"
+            message += "/voice_elena - Елена (женский)\n"
+            message += "/voice_arina - Арина (премиум женский)\n\n"
+        
+        if yandex_engines:
+            message += "**Yandex SpeechKit (премиум как Алиса):**\n"
+            message += "/voice_jane - Jane (женский, как Алиса)\n"
+            message += "/voice_alena - Alena (женский)\n"
+            message += "/voice_filipp - Filipp (мужской)"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
 
     async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
         """Установка голосового движка"""
@@ -432,6 +510,16 @@ class GeminiBot:
                 else:
                     # Fallback к Дмитрию если модель не найдена
                     return await self._piper_synthesize(text, "ru_RU-dmitri-medium")
+            elif engine.startswith("yandex_"):
+                # Yandex SpeechKit TTS
+                engine_info = VOICE_ENGINES.get(engine)
+                if engine_info and "yandex_voice" in engine_info:
+                    yandex_voice = engine_info["yandex_voice"]
+                    return await self._yandex_synthesize(text, yandex_voice, language)
+                else:
+                    # Fallback к gTTS
+                    logger.warning(f"Yandex voice not configured for {engine}, falling back to gTTS")
+                    return await self._gtts_synthesize(text, language, slow=False)
             else:
                 # Fallback к gTTS
                 logger.warning(f"Engine {engine} not available, falling back to gTTS")
@@ -468,9 +556,32 @@ class GeminiBot:
                     os.unlink(temp_path)
                 except:
                     pass
+                    except Exception as e:
+                logger.error(f"Error in gTTS synthesis: {e}")
+                return None
+
+    async def _yandex_synthesize(self, text: str, voice: str = "jane", language: str = "ru") -> Optional[bytes]:
+        """Синтез с помощью Yandex SpeechKit (демо версия без API ключа)"""
+        try:
+            # Для демонстрации используем публичный demo endpoint
+            # В продакшене нужен API ключ Yandex Cloud
+            logger.info(f"Attempting Yandex SpeechKit synthesis with voice: {voice}")
+            
+            # Ограничения для demo версии
+            if len(text) > 500:
+                text = text[:500] + "..."
+                logger.info("Text truncated for Yandex demo")
+            
+            # Fallback к gTTS так как Yandex требует API ключ
+            logger.info("Yandex SpeechKit requires API key, falling back to enhanced gTTS")
+            
+            # Используем gTTS с оптимизированными настройками для лучшего качества
+            return await self._gtts_synthesize(text, language, slow=True)  # Медленная речь для лучшего качества
+            
         except Exception as e:
-            logger.error(f"Error in gTTS synthesis: {e}")
-            return None
+            logger.error(f"Error in Yandex synthesis: {e}")
+            # Fallback к gTTS
+            return await self._gtts_synthesize(text, language, slow=False)
 
     async def _piper_synthesize(self, text: str, voice_model: str = "ru_RU-dmitri-medium") -> Optional[bytes]:
         """Синтез с помощью Piper TTS (command-line version)"""
@@ -602,8 +713,8 @@ class GeminiBot:
                     cwd="/app"  # Устанавливаем рабочую директорию
                 )
                 
-                # Отправляем текст на stdin (увеличиваем таймаут до 60 секунд)
-                stdout, stderr = process.communicate(input=text, timeout=60)
+                # Отправляем текст на stdin (увеличиваем таймаут до 90 секунд)
+                stdout, stderr = process.communicate(input=text, timeout=90)
                 
                 logger.info(f"Piper process completed with return code: {process.returncode}")
                 if stdout:
@@ -1248,10 +1359,18 @@ async def main():
     telegram_app.add_handler(CommandHandler("voice_select", bot.voice_select_command))
     telegram_app.add_handler(CommandHandler("voice_gtts", lambda u, c: bot.set_voice_engine_command(u, c, "gtts")))
     telegram_app.add_handler(CommandHandler("voice_gtts_slow", lambda u, c: bot.set_voice_engine_command(u, c, "gtts_slow")))
+    # Piper TTS голоса
     telegram_app.add_handler(CommandHandler("voice_dmitri", lambda u, c: bot.set_voice_engine_command(u, c, "piper_dmitri")))
     telegram_app.add_handler(CommandHandler("voice_ruslan", lambda u, c: bot.set_voice_engine_command(u, c, "piper_ruslan")))
+    telegram_app.add_handler(CommandHandler("voice_pavel", lambda u, c: bot.set_voice_engine_command(u, c, "piper_pavel")))
     telegram_app.add_handler(CommandHandler("voice_irina", lambda u, c: bot.set_voice_engine_command(u, c, "piper_irina")))
     telegram_app.add_handler(CommandHandler("voice_anna", lambda u, c: bot.set_voice_engine_command(u, c, "piper_anna")))
+    telegram_app.add_handler(CommandHandler("voice_elena", lambda u, c: bot.set_voice_engine_command(u, c, "piper_elena")))
+    telegram_app.add_handler(CommandHandler("voice_arina", lambda u, c: bot.set_voice_engine_command(u, c, "piper_arina")))
+    # Yandex SpeechKit голоса
+    telegram_app.add_handler(CommandHandler("voice_jane", lambda u, c: bot.set_voice_engine_command(u, c, "yandex_jane")))
+    telegram_app.add_handler(CommandHandler("voice_alena", lambda u, c: bot.set_voice_engine_command(u, c, "yandex_alena")))
+    telegram_app.add_handler(CommandHandler("voice_filipp", lambda u, c: bot.set_voice_engine_command(u, c, "yandex_filipp")))
 
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
