@@ -651,10 +651,14 @@ class GeminiBot:
                 logger.error("Azure Speech API key not found")
                 return None
             
+            # Определяем пол голоса по его имени
+            gender = 'Male' if any(male_voice in voice.lower() for male_voice in ['dmitry', 'artem', 'дмитр', 'артем']) else 'Female'
+            logger.info(f"Using Azure voice {voice} with gender {gender}")
+            
             # Создаем SSML для Azure Speech
             ssml = f"""
             <speak version='1.0' xml:lang='ru-RU'>
-                <voice xml:lang='ru-RU' xml:gender='Female' name='{voice}'>
+                <voice xml:lang='ru-RU' xml:gender='{gender}' name='{voice}'>
                     {text}
                 </voice>
             </speak>
