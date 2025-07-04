@@ -265,40 +265,39 @@ class GeminiBot:
         message = "🎤 Доступные голосовые движки:\n\n"
         
         if google_engines:
-            message += "📱 **Google TTS:**\n" + "\n\n".join(google_engines) + "\n\n"
+            message += "📱 *Google TTS:*\n" + "\n".join(google_engines) + "\n\n"
         
         if piper_male_engines:
-            message += "👨 **Piper TTS - Мужские голоса:**\n" + "\n\n".join(piper_male_engines) + "\n\n"
+            message += "👨 *Piper TTS - Мужские голоса:*\n" + "\n".join(piper_male_engines) + "\n\n"
         
         if piper_female_engines:
-            message += "👩 **Piper TTS - Женские голоса:**\n" + "\n\n".join(piper_female_engines) + "\n\n"
+            message += "👩 *Piper TTS - Женские голоса:*\n" + "\n".join(piper_female_engines) + "\n\n"
             
         if yandex_engines:
-            message += "🌟 **Yandex SpeechKit - Премиум качество (как Алиса):**\n" + "\n\n".join(yandex_engines) + "\n\n"
+            message += "🌟 *Yandex SpeechKit - Премиум качество:*\n" + "\n".join(yandex_engines) + "\n\n"
         
-        # Команды для быстрого выбора
-        message += "\n📝 **Команды для выбора голоса:**\n"
-        message += "**Google TTS:**\n"
-        message += "/voice_gtts - Google TTS\n"
-        message += "/voice_gtts_slow - Google TTS (медленный)\n\n"
+        # Команды для быстрого выбора (отправляем отдельным сообщением чтобы избежать лимита)
+        commands_message = "📝 *Команды для выбора голоса:*\n\n"
+        commands_message += "*Google TTS:*\n"
+        commands_message += "/voice_gtts - Google TTS\n"
+        commands_message += "/voice_gtts_slow - Google TTS (медленный)\n\n"
         
         if piper_male_engines or piper_female_engines:
-            message += "**Piper TTS (высокое качество):**\n"
-            message += "/voice_dmitri - Дмитрий (мужской)\n"
-            message += "/voice_ruslan - Руслан (мужской)\n"
-            message += "/voice_pavel - Павел (мужской)\n"
-            message += "/voice_irina - Ирина (женский)\n"
-            message += "/voice_anna - Анна (женский)\n"
-            message += "/voice_elena - Елена (женский)\n"
-            message += "/voice_arina - Арина (премиум женский)\n\n"
+            commands_message += "*Piper TTS (высокое качество):*\n"
+            commands_message += "/voice_dmitri - Дмитрий (мужской)\n"
+            commands_message += "/voice_ruslan - Руслан (мужской)\n"
+            commands_message += "/voice_irina - Ирина (женский)\n"
+            commands_message += "/voice_anna - Анна (женский)\n\n"
         
         if yandex_engines:
-            message += "**Yandex SpeechKit (премиум как Алиса):**\n"
-            message += "/voice_jane - Jane (женский, как Алиса)\n"
-            message += "/voice_alena - Alena (женский)\n"
-            message += "/voice_filipp - Filipp (мужской)"
+            commands_message += "*Yandex SpeechKit:*\n"
+            commands_message += "/voice_jane - Jane (женский, как Алиса)\n"
+            commands_message += "/voice_alena - Alena (женский)\n"
+            commands_message += "/voice_filipp - Filipp (мужской)"
         
+        # Отправляем сообщения отдельно чтобы избежать лимитов
         await update.message.reply_text(message, parse_mode='Markdown')
+        await update.message.reply_text(commands_message, parse_mode='Markdown')
 
     async def set_voice_engine_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, engine: str):
         """Установка голосового движка"""
