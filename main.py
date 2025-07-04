@@ -449,13 +449,22 @@ async def health_check(request):
 async def webhook_handler(request):
     """Обработчик webhook"""
     try:
+        logger.info(f"Webhook received: {request.method} {request.path}")
         data = await request.json()
+        logger.info(f"Webhook data keys: {list(data.keys())}")
+        
+        if not telegram_app:
+            logger.error("telegram_app is None!")
+            return web.Response(status=500, text="Bot not initialized")
+            
         update = Update.de_json(data, telegram_app.bot)
+        logger.info(f"Update processed: {update.update_id if update else 'None'}")
+        
         await telegram_app.process_update(update)
-        return web.Response(status=200)
+        return web.Response(status=200, text="OK")
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return web.Response(status=500)
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return web.Response(status=500, text=f"Error: {str(e)}")
 
 async def start_web_server():
     """Запуск веб сервера"""
@@ -469,12 +478,18 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     logger.info(f"Web server started on port {PORT}")
+    logger.info(f"Routes: {[route.resource.canonical for route in app.router.routes()]}")
 
 async def main():
     """Основная функция"""
     global telegram_app
     
     logger.info("Starting Gemini Telegram Bot...")
+    logger.info(f"TELEGRAM_TOKEN: {'✓' if TELEGRAM_TOKEN else '✗'}")
+    logger.info(f"AI_API_KEY: {'✓' if AI_API_KEY else '✗'}")
+    logger.info(f"NEWS_API_KEY: {'✓' if NEWS_API_KEY else '✗'}")
+    logger.info(f"PORT: {PORT}")
+    logger.info(f"RENDER environment: {'✓' if os.environ.get('RENDER') else '✗'}")
     
     if not TELEGRAM_TOKEN or not AI_API_KEY:
         logger.error("Missing required environment variables")
