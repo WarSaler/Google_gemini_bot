@@ -319,7 +319,9 @@ class GeminiBot:
         """Установка голосового движка"""
         user_id = update.effective_user.id
         
-        logger.info(f"User {user_id} trying to set voice engine: {engine}")
+        logger.info(f"🎵 SET_VOICE_ENGINE_COMMAND CALLED! User {user_id} trying to set voice engine: {engine}")
+        logger.info(f"🎵 Message text: '{update.message.text if update.message else 'No message'}'")
+        logger.info(f"🎵 Available engines: {list(VOICE_ENGINES.keys())}")
         
         if engine not in VOICE_ENGINES:
             logger.warning(f"Unknown engine {engine} requested by user {user_id}")
@@ -1353,6 +1355,25 @@ async def webhook_handler(request):
             
         update = Update.de_json(data, telegram_app.bot)
         logger.info(f"Update processed: {update.update_id if update else 'None'}")
+        
+        # ДОБАВЛЕНО: Детальное логирование для команд
+        if update and update.message and update.message.text:
+            message_text = update.message.text
+            logger.info(f"Message text: '{message_text}'")
+            
+            if message_text.startswith('/voice_'):
+                logger.info(f"VOICE COMMAND DETECTED: {message_text}")
+                logger.info(f"User ID: {update.effective_user.id if update.effective_user else 'Unknown'}")
+                logger.info(f"Available handlers: {len(telegram_app.handlers)}")
+                
+                # Проверяем, есть ли обработчик для этой команды
+                for group in telegram_app.handlers.values():
+                    for handler in group:
+                        if hasattr(handler, 'command') and isinstance(handler.command, (list, set)):
+                            if message_text[1:] in handler.command:
+                                logger.info(f"Found handler for command: {message_text}")
+                        elif hasattr(handler, 'command') and handler.command == message_text[1:]:
+                            logger.info(f"Found handler for command: {message_text}")
         
         await telegram_app.process_update(update)
         return web.Response(status=200, text="OK")
