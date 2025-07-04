@@ -476,6 +476,8 @@ class GeminiBot:
         """Синтез с помощью Piper TTS (pip version)"""
         try:
             import tempfile
+            import os
+            import wave
             from piper.voice import PiperVoice
             
             # Определяем модель голоса
@@ -502,33 +504,68 @@ class GeminiBot:
                 else:
                     raise Exception("Voices directory not found")
             
+            logger.info(f"Loading Piper voice model: {model_path}")
+            
             # Загружаем голосовую модель
             voice = PiperVoice.load(model_path, config_path)
+            logger.info(f"Voice loaded successfully, sample rate: {voice.config.sample_rate}")
             
             # Создаем временный файл для результата
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
                 temp_path = temp_file.name
             
+            logger.info(f"Temporary file created: {temp_path}")
+            
             try:
-                # Синтезируем речь напрямую в файл
-                voice.synthesize(text, temp_path)
+                # Синтезируем речь используя правильный API
+                logger.info(f"Starting synthesis for text: {text[:50]}...")
+                
+                # Синтез через генератор аудио данных
+                audio_data = b""
+                for audio_chunk in voice.synthesize_stream(text):
+                    audio_data += audio_chunk
+                
+                if not audio_data:
+                    raise Exception("No audio data generated")
+                
+                logger.info(f"Generated raw audio data: {len(audio_data)} bytes")
+                
+                # Создаем WAV файл с правильными параметрами
+                with wave.open(temp_path, 'wb') as wav_file:
+                    wav_file.setnchannels(1)  # моно
+                    wav_file.setsampwidth(2)   # 16-bit
+                    wav_file.setframerate(voice.config.sample_rate)
+                    wav_file.writeframes(audio_data)
+                
+                # Проверяем что файл создан и не пустой
+                if not os.path.exists(temp_path):
+                    raise Exception("Output file was not created")
+                
+                file_size = os.path.getsize(temp_path)
+                if file_size == 0:
+                    raise Exception("Output file is empty")
+                
+                logger.info(f"Output WAV file size: {file_size} bytes")
                 
                 # Читаем результат из файла
                 with open(temp_path, 'rb') as audio_file:
-                    audio_bytes = audio_file.read()
+                    wav_bytes = audio_file.read()
                 
-                logger.info(f"Piper TTS synthesis success: generated {len(audio_bytes)} bytes")
-                return audio_bytes
+                logger.info(f"Piper TTS synthesis success: generated {len(wav_bytes)} bytes")
+                return wav_bytes
                 
             finally:
                 # Очистка временного файла
                 try:
-                    os.unlink(temp_path)
-                except:
-                    pass
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                        logger.debug(f"Cleaned up temporary file: {temp_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup temporary file: {cleanup_error}")
             
         except Exception as e:
             logger.error(f"Piper TTS synthesis error: {e}")
+            logger.exception("Full traceback:")
             return None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
