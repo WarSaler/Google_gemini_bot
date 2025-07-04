@@ -483,19 +483,19 @@ class GeminiBot:
             if not voice_model:
                 voice_model = "ru_RU-dmitri-medium"
             
-            # Обновленные пути для новой структуры
-            model_path = f"piper_tts/voices/{voice_model}.onnx"
+            # Обновленные пути для новой структуры (используем абсолютные пути)
+            model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
             
             # Проверяем существование файла модели
             if not os.path.exists(model_path):
                 logger.warning(f"Voice model {voice_model} not found, using fallback")
                 # Попробуем найти любую доступную модель
-                voices_dir = "piper_tts/voices"
+                voices_dir = "/app/piper_tts/voices"
                 if os.path.exists(voices_dir):
                     onnx_files = [f for f in os.listdir(voices_dir) if f.endswith('.onnx')]
                     if onnx_files:
                         voice_model = onnx_files[0].replace('.onnx', '')
-                        model_path = f"piper_tts/voices/{voice_model}.onnx"
+                        model_path = f"/app/piper_tts/voices/{voice_model}.onnx"
                         logger.info(f"Using fallback voice model: {voice_model}")
                     else:
                         logger.error("No voice models found")
@@ -507,7 +507,8 @@ class GeminiBot:
             # Проверяем наличие исполняемого файла piper в новых путях
             piper_executable = None
             possible_paths = [
-                "piper_tts/bin/piper/piper",  # Новая структура
+                "/app/piper_tts/bin/piper/piper",  # Новая структура - абсолютный путь
+                "piper_tts/bin/piper/piper",  # Новая структура - относительный путь
                 "/usr/local/bin/piper",
                 "/usr/bin/piper", 
                 "/app/piper",
@@ -519,12 +520,21 @@ class GeminiBot:
                     if os.path.exists(path) and os.access(path, os.X_OK):
                         # Проверяем что файл действительно работает
                         result = subprocess.run([path, "--help"], 
-                                              capture_output=True, timeout=5)
+                                              capture_output=True, timeout=5, text=True)
                         if result.returncode == 0:
                             piper_executable = path
                             logger.info(f"Found piper executable at: {path}")
+                            # Логируем версию и help для отладки
+                            try:
+                                version_result = subprocess.run([path, "--version"], 
+                                                              capture_output=True, timeout=5, text=True)
+                                if version_result.returncode == 0:
+                                    logger.info(f"Piper version: {version_result.stdout.strip()}")
+                            except:
+                                logger.info("Could not get piper version")
                             break
-                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
+                    logger.debug(f"Failed to check piper at {path}: {e}")
                     continue
             
             if not piper_executable:
@@ -539,12 +549,15 @@ class GeminiBot:
                 # Запускаем Piper TTS через командную строку
                 logger.info(f"Running Piper TTS with model: {model_path}")
                 
-                # Команда для запуска Piper
+                # Команда для запуска Piper (используем правильный параметр --output_file)
                 cmd = [
                     piper_executable,
                     "--model", model_path,
                     "--output_file", temp_path
                 ]
+                
+                logger.info(f"Running command: {' '.join(cmd)}")
+                logger.info(f"Text to synthesize: {text[:50]}...")
                 
                 # Запускаем процесс
                 process = subprocess.Popen(
@@ -552,11 +565,18 @@ class GeminiBot:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    text=True,
+                    cwd="/app"  # Устанавливаем рабочую директорию
                 )
                 
                 # Отправляем текст на stdin
                 stdout, stderr = process.communicate(input=text, timeout=30)
+                
+                logger.info(f"Piper process completed with return code: {process.returncode}")
+                if stdout:
+                    logger.info(f"Piper stdout: {stdout}")
+                if stderr:
+                    logger.info(f"Piper stderr: {stderr}")
                 
                 if process.returncode == 0:
                     # Читаем созданный WAV файл
@@ -567,10 +587,21 @@ class GeminiBot:
                         return audio_data
                     else:
                         logger.error("Output file was not created")
+                        logger.error(f"Checked path: {temp_path}")
+                        # Проверим что есть в текущей директории
+                        try:
+                            import glob
+                            wav_files = glob.glob("*.wav")
+                            logger.info(f"WAV files in current directory: {wav_files}")
+                        except:
+                            pass
                         return None
                 else:
                     logger.error(f"Piper TTS failed with return code {process.returncode}")
+                    logger.error(f"Command: {' '.join(cmd)}")
+                    logger.error(f"Working directory: /app")
                     logger.error(f"Error output: {stderr}")
+                    logger.error(f"Standard output: {stdout}")
                     return None
                     
             except subprocess.TimeoutExpired:
