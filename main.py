@@ -14,8 +14,9 @@ from aiohttp import web
 from newsapi import NewsApiClient
 from bs4 import BeautifulSoup
 
-from telegram import Update, ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # Настройка логирования (должно быть в начале!)
 logging.basicConfig(
