@@ -414,21 +414,25 @@ class GeminiBot:
             if messages and len(messages) > 0:
                 user_message = messages[-1].get("content", "").lower()
             
-            # Добавляем системное сообщение только для запросов, связанных с возрастом
-            age_related_keywords = ['возраст', 'лет', 'года', 'годы', 'сколько лет', 'родился', 'родилась', 'дата рождения']
-            is_age_query = any(keyword in user_message for keyword in age_related_keywords)
-            
             headers = {
                 'Content-Type': 'application/json',
             }
             
-            # Создаем список сообщений, добавляя системное сообщение только для запросов о возрасте
+            # Всегда добавляем системное сообщение с текущей датой для контекста
             all_messages = []
-            if is_age_query:
-                current_date = datetime.now().strftime("%d.%m.%Y")
-                system_message = f"ВАЖНО: Сегодня {current_date} год. При расчете возраста людей используй эту дату."
-                all_messages.append({"role": "system", "content": system_message})
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            current_year = datetime.now().year
+            current_time = datetime.now().strftime("%H:%M:%S")
             
+            # Системное сообщение с актуальной информацией
+            system_message = f"""СИСТЕМНАЯ ИНФОРМАЦИЯ:
+Текущая дата: {current_date} ({current_year} год)
+Текущее время: {current_time} (московское время)
+День недели: {['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'][datetime.now().weekday()]}
+
+ВАЖНО: Всегда используй эту актуальную дату при ответах на вопросы о времени, датах, днях недели, возрасте и т.д."""
+            
+            all_messages.append({"role": "system", "content": system_message})
             all_messages.extend(messages)
             
             data = {
@@ -693,6 +697,29 @@ class GeminiBot:
         user_sessions[user_id].append({"role": "user", "content": user_message})
         messages = list(user_sessions[user_id])
         
+        # Проверяем, нужны ли актуальные данные
+        if self.needs_current_data(user_message):
+            logger.info(f"User {user_id} needs current data for: {user_message}")
+            current_data = await self.get_current_data(user_message)
+            
+            if current_data:
+                # Добавляем актуальную информацию в контекст
+                current_date = datetime.now().strftime("%d.%m.%Y")
+                current_time = datetime.now().strftime("%H:%M:%S")
+                enhanced_message = f"""АКТУАЛЬНАЯ ИНФОРМАЦИЯ:
+{current_data}
+
+Текущая дата: {current_date}
+Текущее время: {current_time} (московское время)
+
+Вопрос пользователя: {user_message}
+
+Пожалуйста, используй предоставленную актуальную информацию для ответа на вопрос."""
+                
+                # Создаем новый список сообщений с актуальной информацией
+                messages = list(user_sessions[user_id])
+                messages[-1] = {"role": "user", "content": enhanced_message}
+        
         # Вызов API
         response = await self.call_gemini_api(messages)
         
@@ -737,13 +764,16 @@ class GeminiBot:
             'новости', 'свежие новости', 'последние новости',
             'курс валют', 'курс доллара', 'курс евро', 'цена bitcoin',
             'погода сегодня', 'погода сейчас', 'текущая погода',
-            'сколько лет', 'возраст', 'когда родился', 'когда родилась'
+            'сколько лет', 'возраст', 'когда родился', 'когда родилась',
+            'какое число', 'какой день', 'какой месяц', 'какой год',
+            'текущая дата', 'текущее время', 'который час'
         ]
         
         # Временные маркеры
         time_keywords = [
             'сегодня', 'сейчас', 'вчера', 'завтра', 'на данный момент',
-            'в настоящее время', 'текущий', 'актуальн', 'свеж', 'последн'
+            'в настоящее время', 'текущий', 'актуальн', 'свеж', 'последн',
+            'число', 'дата', 'день недели', 'месяц', 'год'
         ]
         
         # Проверяем явные запросы актуальной информации
@@ -762,17 +792,23 @@ class GeminiBot:
             
         return False
 
-    async def get_current_data(self, query: str) -> str:
+    async def get_current_data(self, query: str) -> Optional[str]:
         """Получение актуальных данных"""
         try:
+            query_lower = query.lower()
+            
             # Определяем тип запроса
-            if any(word in query.lower() for word in ['новости', 'новость', 'политическ']):
+            if any(word in query_lower for word in ['какое число', 'какой день', 'какой месяц', 'какой год', 
+                                                    'текущая дата', 'текущее время', 'который час',
+                                                    'число', 'дата', 'день недели']):
+                return await self.get_current_datetime(query)
+            elif any(word in query_lower for word in ['новости', 'новость', 'политическ']):
                 return await self.search_news(query)
-            elif any(word in query.lower() for word in ['курс', 'цена', 'стоимость']):
+            elif any(word in query_lower for word in ['курс', 'цена', 'стоимость']):
                 return await self.search_currency_rates(query)
-            elif any(word in query.lower() for word in ['погода']):
+            elif any(word in query_lower for word in ['погода']):
                 return await self.search_weather_data(query)
-            elif any(word in query.lower() for word in ['сколько лет', 'возраст', 'лет']):
+            elif any(word in query_lower for word in ['сколько лет', 'возраст', 'лет']):
                 return await self.handle_age_query(query)
             else:
                 # Общий поиск
@@ -882,6 +918,48 @@ class GeminiBot:
     async def search_weather_data(self, query: str) -> Optional[str]:
         """Поиск погоды"""
         return await self.search_duckduckgo(f"погода {query}")
+    
+    async def get_current_datetime(self, query: str) -> str:
+        """Получение текущей даты и времени"""
+        try:
+            from datetime import datetime
+            import locale
+            
+            # Пытаемся установить русскую локаль
+            try:
+                locale.setlocale(locale.LC_TIME, 'ru_RU.UTF-8')
+            except:
+                pass
+            
+            now = datetime.now()
+            
+            # Дни недели и месяцы на русском
+            days_ru = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
+            months_ru = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 
+                         'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+            
+            day_of_week = days_ru[now.weekday()]
+            month_name = months_ru[now.month - 1]
+            
+            date_str = f"{now.day} {month_name} {now.year} года"
+            time_str = now.strftime("%H:%M:%S")
+            
+            result = f"📅 ТЕКУЩАЯ ДАТА И ВРЕМЯ:\n\n"
+            result += f"📆 Сегодня: {day_of_week}, {date_str}\n"
+            result += f"⏰ Время: {time_str} (московское время)\n"
+            result += f"\n📝 Дополнительная информация:\n"
+            result += f"• День недели: {day_of_week}\n"
+            result += f"• Число: {now.day}\n"
+            result += f"• Месяц: {month_name} ({now.month})\n"
+            result += f"• Год: {now.year}\n"
+            result += f"• Неделя года: {now.isocalendar()[1]}\n"
+            result += f"• День года: {now.timetuple().tm_yday}"
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting current datetime: {e}")
+            return f"Не удалось получить текущую дату. Ошибка: {str(e)}"
 
     async def handle_age_query(self, query: str) -> Optional[str]:
         """Обработка запросов о возрасте с актуальной датой"""
@@ -1097,6 +1175,30 @@ class GeminiBot:
             # Добавление сообщения пользователя в историю
             user_sessions[user_id].append({"role": "user", "content": transcribed_text})
             messages = list(user_sessions[user_id])
+            
+            # Проверяем, нужны ли актуальные данные
+            if self.needs_current_data(transcribed_text):
+                logger.info(f"Voice user {user_id} needs current data for: {transcribed_text}")
+                await self.send_service_message(update, context, "🔍 Ищу актуальную информацию...", user_id)
+                current_data = await self.get_current_data(transcribed_text)
+                
+                if current_data:
+                    # Добавляем актуальную информацию в контекст
+                    current_date = datetime.now().strftime("%d.%m.%Y")
+                    current_time = datetime.now().strftime("%H:%M:%S")
+                    enhanced_message = f"""АКТУАЛЬНАЯ ИНФОРМАЦИЯ:
+{current_data}
+
+Текущая дата: {current_date}
+Текущее время: {current_time} (московское время)
+
+Вопрос пользователя: {transcribed_text}
+
+Пожалуйста, используй предоставленную актуальную информацию для ответа на вопрос."""
+                    
+                    # Обновляем последнее сообщение с актуальной информацией
+                    messages = list(user_sessions[user_id])
+                    messages[-1] = {"role": "user", "content": enhanced_message}
 
             # Уведомление о начале обработки - заменяем предыдущее служебное сообщение
             await self.send_service_message(update, context, "💭 Думаю над ответом...", user_id)
