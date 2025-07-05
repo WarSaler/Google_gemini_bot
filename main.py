@@ -73,37 +73,18 @@ def initialize_voice_engines():
             "description": "Стандартный качественный голос Google",
             "available": VOICE_FEATURES_AVAILABLE
         },
-        # Azure Speech Services - мужские голоса
+        # Azure Speech Services - только Дмитрий и Светлана
         "azure_dmitri": {
             "name": "Azure Speech - Дмитрий",
             "description": "Реалистичный мужской голос высокого качества",
             "available": VOICE_FEATURES_AVAILABLE,
             "azure_voice": "ru-RU-DmitryNeural"
         },
-        "azure_artem": {
-            "name": "Azure Speech - Артём",
-            "description": "Естественный мужской голос",
-            "available": VOICE_FEATURES_AVAILABLE,
-            "azure_voice": "ru-RU-ArtemNeural"
-        },
-        # Azure Speech Services - женские голоса  
         "azure_svetlana": {
             "name": "Azure Speech - Светлана",
             "description": "Реалистичный женский голос высокого качества",
             "available": VOICE_FEATURES_AVAILABLE,
             "azure_voice": "ru-RU-SvetlanaNeural"
-        },
-        "azure_darya": {
-            "name": "Azure Speech - Дарья",
-            "description": "Естественный женский голос",
-            "available": VOICE_FEATURES_AVAILABLE,
-            "azure_voice": "ru-RU-DaryaNeural"
-        },
-        "azure_polina": {
-            "name": "Azure Speech - Полина",
-            "description": "Мягкий женский голос",
-            "available": VOICE_FEATURES_AVAILABLE,
-            "azure_voice": "ru-RU-PolinaNeural"
         }
     }
     
@@ -233,10 +214,7 @@ class GeminiBot:
 
 🔸 AZURE SPEECH SERVICES ({azure_status}):
 /voicedmitri - Дмитрий (мужской)
-/voiceartem - Артём (мужской) 
 /voicesvetlana - Светлана (женский)
-/voicedarya - Дарья (женский)
-/voicepolina - Полина (женский)
 
 ℹ️ Команды также работают с подчёркиваниями:
 /voice_gtts, /voice_dmitri и т.д."""
@@ -1299,6 +1277,31 @@ async def start_web_server():
     logger.info(f"Routes: {[route.resource.canonical for route in app.router.routes()]}")
     return app
 
+async def keep_alive():
+    """Фоновая задача для предотвращения засыпания сервера на Render"""
+    logger.info("Starting keep-alive task...")
+    
+    # URL сервера - используем переменную окружения или дефолтный URL
+    server_url = os.getenv('RENDER_EXTERNAL_URL', 'https://google-gemini-bot.onrender.com')
+    health_url = f"{server_url}/health"
+    
+    while True:
+        try:
+            # Ждем 5 минут
+            await asyncio.sleep(300)  # 300 секунд = 5 минут
+            
+            # Пингуем health endpoint
+            async with aiohttp.ClientSession() as session:
+                async with session.get(health_url, timeout=10) as response:
+                    if response.status == 200:
+                        logger.info(f"Keep-alive ping successful: {response.status}")
+                    else:
+                        logger.warning(f"Keep-alive ping returned status: {response.status}")
+        except Exception as e:
+            logger.error(f"Keep-alive ping error: {e}")
+            # Продолжаем работу даже при ошибке
+            pass
+
 async def main():
     """Основная функция"""
     global telegram_app
@@ -1334,10 +1337,7 @@ async def main():
     async def voice_gtts_command(u, c): await bot.set_voice_engine_command(u, c, "gtts")
     # Azure Speech Services команды
     async def voice_dmitri_command(u, c): await bot.set_voice_engine_command(u, c, "azure_dmitri")
-    async def voice_artem_command(u, c): await bot.set_voice_engine_command(u, c, "azure_artem")
     async def voice_svetlana_command(u, c): await bot.set_voice_engine_command(u, c, "azure_svetlana")
-    async def voice_darya_command(u, c): await bot.set_voice_engine_command(u, c, "azure_darya")
-    async def voice_polina_command(u, c): await bot.set_voice_engine_command(u, c, "azure_polina")
     
     # ДОБАВЛЯЕМ ОБРАБОТЧИКИ ДЛЯ КОМАНД С ПОДЧЕРКИВАНИЕМ И БЕЗ
     # Google TTS
@@ -1348,16 +1348,10 @@ async def main():
     # Мужские голоса
     telegram_app.add_handler(CommandHandler("voice_dmitri", voice_dmitri_command))
     telegram_app.add_handler(CommandHandler("voicedmitri", voice_dmitri_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_artem", voice_artem_command))
-    telegram_app.add_handler(CommandHandler("voiceartem", voice_artem_command))  # БЕЗ подчеркивания
     
     # Женские голоса
     telegram_app.add_handler(CommandHandler("voice_svetlana", voice_svetlana_command))
     telegram_app.add_handler(CommandHandler("voicesvetlana", voice_svetlana_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_darya", voice_darya_command))
-    telegram_app.add_handler(CommandHandler("voicedarya", voice_darya_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_polina", voice_polina_command))
-    telegram_app.add_handler(CommandHandler("voicepolina", voice_polina_command))  # БЕЗ подчеркивания
 
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
@@ -1401,6 +1395,11 @@ async def main():
         logger.info("Starting polling mode")
         await telegram_app.updater.start_polling(drop_pending_updates=True)
         logger.info("Polling started")
+    
+    # Запускаем фоновую задачу для пингования сервера (только в production)
+    if is_production:
+        asyncio.create_task(keep_alive())
+        logger.info("Keep-alive task started for production environment")
     
     # Ожидаем бесконечно
     await asyncio.Event().wait()
