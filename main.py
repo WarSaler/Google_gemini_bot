@@ -14,8 +14,8 @@ from aiohttp import web
 from newsapi import NewsApiClient
 from bs4 import BeautifulSoup
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # Настройка логирования (должно быть в начале!)
 logging.basicConfig(
@@ -711,6 +711,24 @@ class GeminiBot:
         # Отправляем служебное сообщение о том, что думаем
         await self.send_service_message(update, context, "💭 Думаю над ответом...", user_id)
         
+        # Проверка, нужны ли актуальные данные
+        needs_current = self.needs_current_data(user_message)
+        if needs_current:
+            logger.info(f"User {user_id} needs current data for: {user_message}")
+            
+            # Удаляем предыдущее служебное сообщение
+            await self.cleanup_service_messages(update, context, user_id)
+            
+            # Отправляем новое служебное сообщение
+            await self.send_service_message(update, context, "🔍 Ищу актуальную информацию...", user_id)
+            
+            # Получаем актуальные данные
+            current_data = await self.get_current_data(user_message)
+            
+            if current_data:
+                # Добавляем актуальные данные в запрос
+                user_message = f"{user_message}\n\nАктуальная информация: {current_data}"
+        
         # Добавление сообщения пользователя в историю
         user_sessions[user_id].append({"role": "user", "content": user_message})
         messages = list(user_sessions[user_id])
@@ -724,16 +742,11 @@ class GeminiBot:
             # Добавление запроса в счетчик
             self.add_request(user_id)
             
-            # Получение оставшихся запросов
-            remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-            
             # Удаляем служебное сообщение перед отправкой ответа
             await self.cleanup_service_messages(update, context, user_id)
             
-            # Для текстовых сообщений ВСЕГДА отвечаем только текстом
-            # Отправка ответа через безопасную функцию
-            full_response = f"{response}\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-            await self.safe_send_message(update, full_response)
+            # Отправка ответа через безопасную функцию (без информации о лимитах)
+            await self.safe_send_message(update, response)
             
             # Добавление ответа в историю
             user_sessions[user_id].append({"role": "assistant", "content": response})
@@ -860,7 +873,7 @@ class GeminiBot:
                         soup = BeautifulSoup(html, 'html.parser')
                         
                         results = []
-                        for result in soup.find_all('div', {'class': 'result__body'})[:5]:
+                        for result in soup.find_all('div', {'class': 'result__body'})[:7]:  # Увеличиваем количество результатов
                             title_elem = result.find('a', {'class': 'result__a'})
                             snippet_elem = result.find('a', {'class': 'result__snippet'})
                             
@@ -869,16 +882,19 @@ class GeminiBot:
                                 snippet = snippet_elem.get_text().strip()
                                 url = title_elem.get('href', '')
                                 
+                                # Добавляем больше информации из сниппета
                                 results.append(f"• {title}\n{snippet}\n🔗 {url}\n")
                         
                         if results:
-                            return f"🔍 РЕЗУЛЬТАТЫ ПОИСКА:\n\n" + "\n".join(results)
+                            # Добавляем текущую дату для контекста
+                            current_date = datetime.now().strftime("%d.%m.%Y")
+                            return f"🔍 РЕЗУЛЬТАТЫ ПОИСКА (на {current_date}):\n\n" + "\n".join(results)
                         
-            return "Не удалось найти информацию."
+            return "Не удалось найти информацию по вашему запросу. Пожалуйста, уточните запрос или попробуйте позже."
             
         except Exception as e:
             logger.error(f"DuckDuckGo search error: {e}")
-            return "Ошибка поиска."
+            return "Произошла ошибка при поиске информации. Пожалуйста, попробуйте позже."
 
     async def search_currency_rates(self, query: str) -> Optional[str]:
         """Поиск курсов валют"""
@@ -1116,6 +1132,24 @@ class GeminiBot:
             # Отправляем подтверждение распознавания - заменяем предыдущее служебное сообщение
             await self.send_service_message(update, context, f"✅ Распознано: \"{transcribed_text}\"", user_id)
             
+            # Проверка, нужны ли актуальные данные
+            needs_current = self.needs_current_data(transcribed_text)
+            if needs_current:
+                logger.info(f"Voice user {user_id} needs current data for: {transcribed_text}")
+                
+                # Удаляем предыдущее служебное сообщение
+                await self.cleanup_service_messages(update, context, user_id)
+                
+                # Отправляем новое служебное сообщение
+                await self.send_service_message(update, context, "🔍 Ищу актуальную информацию...", user_id)
+                
+                # Получаем актуальные данные
+                current_data = await self.get_current_data(transcribed_text)
+                
+                if current_data:
+                    # Добавляем актуальные данные в запрос
+                    transcribed_text = f"{transcribed_text}\n\nАктуальная информация: {current_data}"
+            
             # Добавление сообщения пользователя в историю
             user_sessions[user_id].append({"role": "user", "content": transcribed_text})
             messages = list(user_sessions[user_id])
@@ -1132,9 +1166,6 @@ class GeminiBot:
                 # Добавление запроса в счетчик
                 self.add_request(user_id)
                 
-                # Получение оставшихся запросов
-                remaining_minute, remaining_day = self.get_remaining_requests(user_id)
-                
                 # ГОЛОСОВЫЕ СООБЩЕНИЯ ВСЕГДА ОТВЕЧАЮТ ГОЛОСОМ (если есть выбранный движок)
                 selected_engine = voice_engine_settings.get(user_id, DEFAULT_VOICE_ENGINE)
                 if VOICE_ENGINES[selected_engine]["available"]:
@@ -1150,9 +1181,10 @@ class GeminiBot:
                     
                     if voice_data:
                         await self.cleanup_service_messages(update, context, user_id)
+                        # Отправляем голосовой ответ без информации о лимитах
                         await update.message.reply_voice(
                             voice=BytesIO(voice_data),
-                            caption=f"🎤 Голосовой ответ\n\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                            caption="🎤 Голосовой ответ"
                         )
                         logger.info(f"Successfully sent complete voice response to user {user_id}")
                         user_sessions[user_id].append({"role": "assistant", "content": response})
@@ -1160,16 +1192,13 @@ class GeminiBot:
                         # Fallback к тексту
                         await self.cleanup_service_messages(update, context, user_id)
                         await update.message.reply_text(
-                            f"💬 {response}\n\n⚠️ Не удалось создать голосовой ответ\n📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
+                            f"💬 {response}\n\n⚠️ Не удалось создать голосовой ответ"
                         )
                         user_sessions[user_id].append({"role": "assistant", "content": response})
                 else:
                     # Текстовый ответ
                     await self.cleanup_service_messages(update, context, user_id)
-                    await update.message.reply_text(
-                        f"💬 {response}\n\n"
-                        f"📊 Осталось запросов: {remaining_minute}/{MINUTE_LIMIT} в минуту, {remaining_day}/{DAILY_LIMIT} сегодня"
-                    )
+                    await update.message.reply_text(f"💬 {response}")
                     
                     # Добавление ответа в историю
                     user_sessions[user_id].append({"role": "assistant", "content": response})
@@ -1230,6 +1259,35 @@ class GeminiBot:
         except Exception as e:
             logger.error(f"Error sending service message: {e}")
             return None
+
+    async def show_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать информацию о лимитах запросов"""
+        user_id = update.effective_user.id
+        
+        # Получение оставшихся запросов
+        remaining_minute, remaining_day = self.get_remaining_requests(user_id)
+        
+        await update.message.reply_text(
+            f"📊 *Информация о лимитах запросов*\n\n"
+            f"• Осталось в текущей минуте: {remaining_minute}/{MINUTE_LIMIT}\n"
+            f"• Осталось сегодня: {remaining_day}/{DAILY_LIMIT}\n\n"
+            f"_Лимиты нужны для защиты от перегрузки и обеспечения стабильной работы бота._",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    def register_handlers(self):
+        """Регистрация обработчиков команд"""
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("clear", self.clear_command))
+        self.application.add_handler(CommandHandler("limits", self.show_limits))
+        self.application.add_handler(CommandHandler("voice", self.voice_command))
+        self.application.add_handler(CommandHandler("voice_select", self.voice_select_command))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
+        self.application.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
@@ -1324,45 +1382,7 @@ async def main():
     bot = GeminiBot()
     
     # Добавление обработчиков
-    telegram_app.add_handler(CommandHandler("start", bot.start_command))
-    telegram_app.add_handler(CommandHandler("help", bot.help_command))
-    telegram_app.add_handler(CommandHandler("clear", bot.clear_command))
-    telegram_app.add_handler(CommandHandler("limits", bot.limits_command))
-    telegram_app.add_handler(CommandHandler("voice", bot.voice_command))
-    telegram_app.add_handler(CommandHandler("voice_select", bot.voice_select_command))
-    # Голосовые команды - используем отдельные методы вместо лямбда
-    async def voice_gtts_command(u, c): await bot.set_voice_engine_command(u, c, "gtts")
-    # Azure Speech Services команды
-    async def voice_dmitri_command(u, c): await bot.set_voice_engine_command(u, c, "azure_dmitri")
-    async def voice_artem_command(u, c): await bot.set_voice_engine_command(u, c, "azure_artem")
-    async def voice_svetlana_command(u, c): await bot.set_voice_engine_command(u, c, "azure_svetlana")
-    async def voice_darya_command(u, c): await bot.set_voice_engine_command(u, c, "azure_darya")
-    async def voice_polina_command(u, c): await bot.set_voice_engine_command(u, c, "azure_polina")
-    
-    # ДОБАВЛЯЕМ ОБРАБОТЧИКИ ДЛЯ КОМАНД С ПОДЧЕРКИВАНИЕМ И БЕЗ
-    # Google TTS
-    telegram_app.add_handler(CommandHandler("voice_gtts", voice_gtts_command))
-    telegram_app.add_handler(CommandHandler("voicegtts", voice_gtts_command))  # БЕЗ подчеркивания
-    
-    # Azure Speech Services голоса
-    # Мужские голоса
-    telegram_app.add_handler(CommandHandler("voice_dmitri", voice_dmitri_command))
-    telegram_app.add_handler(CommandHandler("voicedmitri", voice_dmitri_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_artem", voice_artem_command))
-    telegram_app.add_handler(CommandHandler("voiceartem", voice_artem_command))  # БЕЗ подчеркивания
-    
-    # Женские голоса
-    telegram_app.add_handler(CommandHandler("voice_svetlana", voice_svetlana_command))
-    telegram_app.add_handler(CommandHandler("voicesvetlana", voice_svetlana_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_darya", voice_darya_command))
-    telegram_app.add_handler(CommandHandler("voicedarya", voice_darya_command))  # БЕЗ подчеркивания
-    telegram_app.add_handler(CommandHandler("voice_polina", voice_polina_command))
-    telegram_app.add_handler(CommandHandler("voicepolina", voice_polina_command))  # БЕЗ подчеркивания
-
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO, bot.handle_photo))
-    telegram_app.add_handler(MessageHandler(filters.VOICE, bot.handle_voice))
-    telegram_app.add_error_handler(error_handler)
+    bot.register_handlers()
     
     # Определяем окружение
     is_production = os.environ.get('RENDER') is not None
