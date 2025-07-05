@@ -5,6 +5,7 @@ import base64
 import re
 import tempfile
 import subprocess
+import json
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import Dict, List, Optional
@@ -259,22 +260,25 @@ class GeminiBot:
 
     def clean_text_for_speech(self, text: str) -> str:
         """Очистка текста для синтеза речи"""
-        # Удаляем markdown символы
-        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Убираем жирный текст
-        text = re.sub(r'\*(.*?)\*', r'\1', text)      # Убираем курсив
-        text = re.sub(r'`(.*?)`', r'\1', text)        # Убираем код
-        text = re.sub(r'#{1,6}\s*', '', text)         # Убираем заголовки
-        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)  # Убираем ссылки
-        text = re.sub(r'[_~]', '', text)              # Убираем подчеркивания и зачеркивания
+        # Удаляем Markdown разметку
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Жирный текст **текст**
+        text = re.sub(r'\*(.*?)\*', r'\1', text)      # Курсив *текст*
+        text = re.sub(r'__(.*?)__', r'\1', text)      # Подчеркивание __текст__
+        text = re.sub(r'_(.*?)_', r'\1', text)        # Курсив _текст_
+        text = re.sub(r'```(.*?)```', r'\1', text, flags=re.DOTALL)  # Код ```текст```
+        text = re.sub(r'`(.*?)`', r'\1', text)        # Инлайн код `текст`
+        text = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1', text)  # Ссылки [текст](ссылка)
         
-        # Убираем эмодзи для лучшего озвучивания
-        text = re.sub(r'[🎤🎵📝💬🖼️📰💰⚡❌✅🔍💭📊💡🔄]', '', text)
-        
-        # Убираем множественные пробелы и переносы
+        # Удаляем лишние пробелы
         text = re.sub(r'\s+', ' ', text)
-        text = text.strip()
         
-        return text
+        # Удаляем эмодзи и специальные символы, которые могут вызвать проблемы
+        text = re.sub(r'[^\w\s\.,;:!?«»\-–—()№]', ' ', text)
+        
+        # Удаляем повторяющиеся пробелы
+        text = re.sub(r'\s+', ' ', text)
+        
+        return text.strip()
 
     def smart_split_text(self, text: str, max_chars: int = 200) -> List[str]:
         """Умная разбивка текста на части для голосового синтеза"""
@@ -891,23 +895,33 @@ class GeminiBot:
     async def search_currency_rates(self, query: str) -> Optional[str]:
         """Поиск курсов валют"""
         try:
-            # Простой поиск курса доллара
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://www.cbr-xml-daily.ru/daily_json.js",
-                    timeout=10
-                ) as response:
+                async with session.get('https://www.cbr-xml-daily.ru/daily_json.js', timeout=5) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        usd = data['Valute']['USD']['Value']
-                        eur = data['Valute']['EUR']['Value']
+                        # Обрабатываем ответ как текст, а не как JSON
+                        text_response = await response.text()
+                        # Затем парсим JSON из текста
+                        data = json.loads(text_response)
                         
-                        return f"💰 КУРСЫ ВАЛЮТ (ЦБ РФ):\n\n💵 USD: {usd:.2f} ₽\n💶 EUR: {eur:.2f} ₽"
+                        # Получаем основные валюты
+                        usd = data['Valute']['USD']
+                        eur = data['Valute']['EUR']
+                        cny = data['Valute']['CNY']
                         
+                        # Форматируем результат
+                        current_date = datetime.now().strftime("%d.%m.%Y")
+                        result = f"💰 КУРСЫ ВАЛЮТ ЦБ РФ на {current_date}:\n\n"
+                        result += f"🇺🇸 Доллар США (USD): {usd['Value']:.2f} ₽ ({usd['Previous']:.2f} ₽ вчера)\n"
+                        result += f"🇪🇺 Евро (EUR): {eur['Value']:.2f} ₽ ({eur['Previous']:.2f} ₽ вчера)\n"
+                        result += f"🇨🇳 Юань (CNY): {cny['Value']:.2f} ₽ ({cny['Previous']:.2f} ₽ вчера)\n"
+                        
+                        return result
+            
+            return "Не удалось получить информацию о курсах валют."
+            
         except Exception as e:
             logger.error(f"Currency search error: {e}")
-            
-        return "Не удалось получить курсы валют."
+            return "Произошла ошибка при получении курсов валют."
 
     async def search_weather_data(self, query: str) -> Optional[str]:
         """Поиск погоды"""
