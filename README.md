@@ -73,10 +73,10 @@ cd Google_gemini_bot
 
 ```env
 # Telegram Bot Configuration
-TELEGRAM_TOKEN=1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789
+TELEGRAM_TOKEN=TOKEN
 
 # Google Gemini AI Configuration  
-AI_API_KEY=AIzaSyDemoKey123456789ABCDEFGHIJKLMNOPQRS
+AI_API_KEY=API
 
 # Optional: NewsAPI for current information
 NEWS_API_KEY=your_newsapi_key_here
@@ -135,8 +135,8 @@ python main.py
 В разделе **Environment** добавьте переменные:
 
 ```
-TELEGRAM_TOKEN = 1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789
-AI_API_KEY = AIzaSyDemoKey123456789ABCDEFGHIJKLMNOPQRS
+TELEGRAM_TOKEN = TOKEN
+AI_API_KEY = API_KEY
 NEWS_API_KEY = your_newsapi_key_here (опционально)
 AZURE_SPEECH_KEY = your_azure_speech_key_here (опционально)
 AZURE_SPEECH_REGION = eastus
